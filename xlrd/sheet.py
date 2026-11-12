@@ -827,7 +827,13 @@ class Sheet(BaseObject):
             elif rc == XL_LABELSST:
                 rowx, colx, xf_index, sstindex = local_unpack('<HHHi', data)
                 # print "LABELSST", rowx, colx, sstindex, bk._sharedstrings[sstindex]
-                self_put_cell(rowx, colx, XL_CELL_TEXT, bk._sharedstrings[sstindex], xf_index)
+                strg = bk._sharedstrings[sstindex]
+                if strg is None:
+                    # SST entry not selected for decoding (see the
+                    # sst_select argument of open_workbook); treat the
+                    # cell as empty.
+                    continue
+                self_put_cell(rowx, colx, XL_CELL_TEXT, strg, xf_index)
                 if do_sst_rich_text:
                     runlist = bk._rich_text_runlist_map.get(sstindex)
                     if runlist:

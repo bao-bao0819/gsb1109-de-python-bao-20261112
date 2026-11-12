@@ -90,7 +90,8 @@ def open_workbook(filename=None,
                   formatting_info=False,
                   on_demand=False,
                   ragged_rows=False,
-                  ignore_workbook_corruption=False
+                  ignore_workbook_corruption=False,
+                  sst_select=None
                   ):
     """
     Open a spreadsheet file for data extraction.
@@ -160,6 +161,24 @@ def open_workbook(filename=None,
       When ``False`` you may face CompDocError: Workbook corruption.
       When ``True`` that exception will be ignored.
 
+    :param sst_select:
+
+      Selective reading of the shared string table (BIFF8 ``.xls`` files
+      only). The default of ``None`` decodes every shared string, as before.
+
+      To decode only some shared strings, supply either:
+
+      * a container of SST indexes to decode, or
+
+      * a dict mapping a sheet (index or name) to a container of column
+        indexes; the SST indexes referenced by ``LABELSST`` cells in those
+        columns are then collected automatically.
+
+      Strings that are not selected are stepped over without being decoded
+      into Python strings, and text cells that refer to them are treated as
+      empty. The number of shared-string characters actually decoded is
+      available as ``book._sst_stats['decoded_chars']``.
+
     :returns: An instance of the :class:`~xlrd.book.Book` class.
     """
 
@@ -180,6 +199,7 @@ def open_workbook(filename=None,
         on_demand=on_demand,
         ragged_rows=ragged_rows,
         ignore_workbook_corruption=ignore_workbook_corruption,
+        sst_select=sst_select,
     )
 
     return bk

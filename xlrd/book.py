@@ -61,7 +61,8 @@ def open_workbook_xls(filename=None,
                       file_contents=None,
                       encoding_override=None,
                       formatting_info=False, on_demand=False, ragged_rows=False,
-                      ignore_workbook_corruption=False):
+                      ignore_workbook_corruption=False,
+                      sst_select=None):
     t0 = perf_counter()
     bk = Book()
     try:
@@ -72,7 +73,8 @@ def open_workbook_xls(filename=None,
             formatting_info=formatting_info,
             on_demand=on_demand,
             ragged_rows=ragged_rows,
-            ignore_workbook_corruption=ignore_workbook_corruption
+            ignore_workbook_corruption=ignore_workbook_corruption,
+            sst_select=sst_select,
         )
         t1 = perf_counter()
         bk.load_time_stage_1 = t1 - t0
@@ -570,6 +572,8 @@ class Book(BaseObject):
         self._sh_abs_posn = [] # sheet's absolute position in the stream
         self._sharedstrings = []
         self._rich_text_runlist_map = {}
+        self.sst_select = None
+        self._sst_stats = {}
         self.raw_user_name = False
         self._sheethdr_count = 0 # BIFF 4W only
         self.builtinfmtcount = -1 # unknown as yet. BIFF 3, 4S, 4W
@@ -601,7 +605,8 @@ class Book(BaseObject):
                      formatting_info=False,
                      on_demand=False,
                      ragged_rows=False,
-                     ignore_workbook_corruption=False
+                     ignore_workbook_corruption=False,
+                     sst_select=None,
                      ):
         # DEBUG = 0
         self.logfile = logfile
@@ -611,6 +616,7 @@ class Book(BaseObject):
         self.formatting_info = formatting_info
         self.on_demand = on_demand
         self.ragged_rows = ragged_rows
+        self.sst_select = sst_select
 
         if not file_contents:
             with open(filename, "rb") as f:
@@ -1175,12 +1181,60 @@ class Book(BaseObject):
             if DEBUG >= 2:
                 fprintf(self.logfile, "CONTINUE: adding %d bytes to SST -> %d\n", nb, nbt)
             strlist.append(data)
-        self._sharedstrings, rt_runlist = unpack_SST_table(strlist, uniquestrings)
+        self._sharedstrings, rt_runlist = unpack_SST_table(
+            strlist, uniquestrings,
+            wanted=self._sst_wanted_indices(),
+            stats=self._sst_stats,
+        )
         if self.formatting_info:
             self._rich_text_runlist_map = rt_runlist
         if DEBUG:
             t1 = perf_counter()
             print("SST processing took %.2f seconds" % (t1 - t0, ), file=self.logfile)
+
+    def _sst_wanted_indices(self):
+        # Work out which SST entries should be decoded, based on the
+        # ``sst_select`` argument to open_workbook(). Returns None (decode
+        # everything) or a set of SST indexes.
+        sel = self.sst_select
+        if sel is None:
+            return None
+        if isinstance(sel, dict):
+            wanted = set()
+            for sheet_spec, colxs in sel.items():
+                wanted.update(self._collect_sst_indices(sheet_spec, colxs))
+            return wanted
+        return set(sel)
+
+    def _collect_sst_indices(self, sheet_spec, colxs):
+        # Scan the LABELSST records of one sheet (without materialising any
+        # cells) and return the set of SST indexes used in the given columns.
+        if isinstance(sheet_spec, int):
+            sheetx = sheet_spec
+        else:
+            try:
+                sheetx = self._sheet_names.index(sheet_spec)
+            except ValueError:
+                raise XLRDError('No sheet named <%r>' % sheet_spec)
+        if sheetx < 0 or sheetx >= len(self._sh_abs_posn):
+            raise XLRDError('No sheet indexed %r' % (sheet_spec, ))
+        colx_set = set(colxs)
+        wanted = set()
+        mem = self.mem
+        local_unpack = unpack
+        pos = self._sh_abs_posn[sheetx]
+        endpos = self.base + self.stream_len
+        while pos + 4 <= endpos:
+            rc, length = local_unpack('<HH', mem[pos:pos+4])
+            pos += 4
+            if rc == XL_LABELSST:
+                colx = local_unpack('<H', mem[pos+2:pos+4])[0]
+                if colx in colx_set:
+                    wanted.add(local_unpack('<i', mem[pos+6:pos+10])[0])
+            elif rc == XL_EOF:
+                break
+            pos += length
+        return wanted
 
     def handle_writeaccess(self, data):
         DEBUG = 0
@@ -1386,8 +1440,27 @@ def display_cell_address(rowx, colx, relrow, relcol):
         colpart = "$" + colname(colx)
     return colpart + rowpart
 
-def unpack_SST_table(datatab, nstrings):
-    "Return list of strings"
+def unpack_SST_table(datatab, nstrings, wanted=None, stats=None):
+    """
+    Unpack the SST (shared string table) and return a list of ``nstrings``
+    entries plus a mapping of rich-text formatting runs.
+
+    :param wanted:
+
+      ``None`` (the default) decodes every string. Otherwise it must be a
+      container of SST indexes; only those strings are decoded and the other
+      entries in the returned list are ``None``. Skipped strings are stepped
+      over byte by byte -- they are never decoded into Python strings.
+
+    :param stats:
+
+      If not ``None``, a dict that is updated with ``'decoded_chars'`` and
+      ``'skipped_chars'``, the number of string characters that were decoded
+      and skipped respectively.
+
+    The returned list always has ``nstrings`` entries, so wanted strings are
+    available at their original SST indexes.
+    """
     datainx = 0
     ndatas = len(datatab)
     data = datatab[0]
@@ -1400,7 +1473,10 @@ def unpack_SST_table(datatab, nstrings):
     local_min = min
     local_BYTES_ORD = BYTES_ORD
     latin_1 = "latin_1"
-    for _unused_i in xrange(nstrings):
+    decoded_chars = 0
+    skipped_chars = 0
+    for strx in xrange(nstrings):
+        decode_this = wanted is None or strx in wanted
         nchars = local_unpack('<H', data[pos:pos+2])[0]
         pos += 2
         options = local_BYTES_ORD(data[pos])
@@ -1420,24 +1496,26 @@ def unpack_SST_table(datatab, nstrings):
             if options & 0x01:
                 # Uncompressed UTF-16
                 charsavail = local_min((datalen - pos) >> 1, charsneed)
-                rawstrg = data[pos:pos+2*charsavail]
-                # if DEBUG: print "SST U16: nchars=%d pos=%d rawstrg=%r" % (nchars, pos, rawstrg)
-                try:
-                    accstrg += unicode(rawstrg, "utf_16_le")
-                except Exception:
-                    # print "SST U16: nchars=%d pos=%d rawstrg=%r" % (nchars, pos, rawstrg)
-                    # Probable cause: dodgy data e.g. unfinished surrogate pair.
-                    # E.g. file unicode2.xls in pyExcelerator's examples has cells containing
-                    # unichr(i) for i in range(0x100000)
-                    # so this will include 0xD800 etc
-                    raise
+                if decode_this:
+                    rawstrg = data[pos:pos+2*charsavail]
+                    # if DEBUG: print "SST U16: nchars=%d pos=%d rawstrg=%r" % (nchars, pos, rawstrg)
+                    try:
+                        accstrg += unicode(rawstrg, "utf_16_le")
+                    except Exception:
+                        # print "SST U16: nchars=%d pos=%d rawstrg=%r" % (nchars, pos, rawstrg)
+                        # Probable cause: dodgy data e.g. unfinished surrogate pair.
+                        # E.g. file unicode2.xls in pyExcelerator's examples has cells containing
+                        # unichr(i) for i in range(0x100000)
+                        # so this will include 0xD800 etc
+                        raise
                 pos += 2*charsavail
             else:
                 # Note: this is COMPRESSED (not ASCII!) encoding!!!
                 charsavail = local_min(datalen - pos, charsneed)
-                rawstrg = data[pos:pos+charsavail]
-                # if DEBUG: print "SST CMPRSD: nchars=%d pos=%d rawstrg=%r" % (nchars, pos, rawstrg)
-                accstrg += unicode(rawstrg, latin_1)
+                if decode_this:
+                    rawstrg = data[pos:pos+charsavail]
+                    # if DEBUG: print "SST CMPRSD: nchars=%d pos=%d rawstrg=%r" % (nchars, pos, rawstrg)
+                    accstrg += unicode(rawstrg, latin_1)
                 pos += charsavail
             charsgot += charsavail
             if charsgot == nchars:
@@ -1448,27 +1526,55 @@ def unpack_SST_table(datatab, nstrings):
             options = local_BYTES_ORD(data[0])
             pos = 1
 
+        if decode_this:
+            decoded_chars += nchars
+        else:
+            skipped_chars += nchars
+
         if rtcount:
-            runs = []
-            for runindex in xrange(rtcount):
+            # The formatting runs may straddle a record boundary,
+            # even in the middle of a single 4-byte run.
+            nbytes = 4 * rtcount
+            runbytes = BYTES_LITERAL('')
+            while nbytes:
                 if pos == datalen:
-                    pos = 0
                     datainx += 1
                     data = datatab[datainx]
                     datalen = len(data)
-                runs.append(local_unpack("<HH", data[pos:pos+4]))
-                pos += 4
-            richtext_runs[len(strings)] = runs
+                    pos = 0
+                navail = local_min(nbytes, datalen - pos)
+                if decode_this:
+                    runbytes += data[pos:pos+navail]
+                pos += navail
+                nbytes -= navail
+            if decode_this:
+                runs = []
+                for runpos in xrange(0, 4 * rtcount, 4):
+                    runs.append(local_unpack("<HH", runbytes[runpos:runpos+4]))
+                richtext_runs[strx] = runs
 
-        pos += phosz # size of the phonetic stuff to skip
-        if pos >= datalen:
+        # Skip the phonetic stuff; it may straddle a record boundary.
+        while phosz:
+            if pos == datalen:
+                datainx += 1
+                data = datatab[datainx]
+                datalen = len(data)
+                pos = 0
+            navail = local_min(phosz, datalen - pos)
+            pos += navail
+            phosz -= navail
+
+        if pos == datalen:
             # adjust to correct position in next record
-            pos = pos - datalen
+            pos = 0
             datainx += 1
             if datainx < ndatas:
                 data = datatab[datainx]
                 datalen = len(data)
             else:
-                assert _unused_i == nstrings - 1
-        strappend(accstrg)
+                assert strx == nstrings - 1
+        strappend(accstrg if decode_this else None)
+    if stats is not None:
+        stats['decoded_chars'] = decoded_chars
+        stats['skipped_chars'] = skipped_chars
     return strings, richtext_runs
