@@ -94,6 +94,36 @@ Rate Limiter
 
    .. automethod:: __init__
 
+Coordinate Axis Order Diagnosis
+-------------------------------
+
+When both imported coordinate columns fall within +/-90 degrees, storing
+them as ``(longitude, latitude)`` instead of ``(latitude, longitude)``
+still yields a valid :class:`geopy.point.Point`, so the mistake cannot be
+detected from ranges alone.  :mod:`geopy.extra.axis_order` diagnoses which
+partitions of a station-keyed batch actually use the swapped axis order,
+using range validity, trusted reference coordinates and cross-partition
+distance tolerances.  It reports the partitions forced to a single order,
+enumerates every remaining viable explanation, or locates a minimal group
+of contradictory constraints.
+
+.. automodule:: geopy.extra.axis_order
+   :members: __doc__
+
+.. autofunction:: geopy.extra.axis_order.diagnose_axis_order
+
+.. autofunction:: geopy.extra.axis_order.format_report
+
+.. autoclass:: geopy.extra.axis_order.StationRecord
+
+.. autoclass:: geopy.extra.axis_order.TrustedPoint
+
+.. autoclass:: geopy.extra.axis_order.AxisOrderDiagnosis
+
+.. autoclass:: geopy.extra.axis_order.Explanation
+
+.. autoclass:: geopy.extra.axis_order.Constraint
+
 ArcGIS
 ------
 
