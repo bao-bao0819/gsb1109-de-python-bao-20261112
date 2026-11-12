@@ -26,3 +26,9 @@ API Guide
 .. automodule:: arrow.locales
     :members:
     :undoc-members:
+
+:mod:`arrow.windows`
+=====================
+
+.. automodule:: arrow.windows
+    :members:
