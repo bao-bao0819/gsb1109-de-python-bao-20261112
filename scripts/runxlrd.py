@@ -13,6 +13,8 @@ Commands:
 bench           Same as "show", but doesn't print -- for profiling
 biff_count[1]   Print a count of each type of BIFF record in the file
 biff_dump[1]    Print a dump (char and hex) of the BIFF records in the file
+colx            Export numeric columns with XF/format-section evidence and
+                percent conversion; ambiguous records keep their coordinates
 fonts           hdr + print a dump of all font objects
 hdr             Mini-overview of file (no per-sheet information)
 hotshot         Do a hotshot profile run e.g. ... -f1 hotshot bench bigfile*.xls
@@ -227,6 +229,29 @@ if __name__ == "__main__":
             print()
             if bk.on_demand: bk.unload_sheet(shx)
 
+    def show_column_export(bk):
+        bk_header(bk)
+        for export in xlrd.export_columns(bk):
+            print("sheet %r column %s: %d converted, %d ambiguous" % (
+                export['sheet_name'], export['column_letter'],
+                len(export['converted']), len(export['ambiguous'])))
+            for rec in export['converted']:
+                print("  %s value=%r -> %r unit=%s XF=%d fmtkey=%d(%s) "
+                      "section[%d:%s] %r percent=%s" % (
+                    rec['coordinate'], rec['original_value'],
+                    rec['exported_value'], rec['unit'],
+                    rec['xf_index'], rec['format_key'], rec['format_kind'],
+                    rec['section_index'], rec['section_condition'],
+                    rec['section_text'], rec['section_is_percent']))
+            for rec in export['ambiguous']:
+                print("  %s value=%r REVIEW XF=%d fmtkey=%d(%s) "
+                      "section[%d:%s] %r percent=%s" % (
+                    rec['coordinate'], rec['original_value'],
+                    rec['xf_index'], rec['format_key'], rec['format_kind'],
+                    rec['section_index'], rec['section_condition'],
+                    rec['section_text'], rec['section_is_percent']))
+            print()
+
     def main(cmd_args):
         import optparse
         global options
@@ -300,12 +325,14 @@ if __name__ == "__main__":
         else:
             logfile = sys.stdout
         mmap_opt = options.mmap
-        mmap_arg = xlrd.USE_MMAP
+        # xlrd 2.0 removed the module-level USE_MMAP constant; the historic
+        # default heuristic was to use mmap whenever the module is available.
+        mmap_arg = getattr(xlrd, 'USE_MMAP', True)
         if mmap_opt in (1, 0):
             mmap_arg = mmap_opt
         elif mmap_opt != -1:
             print('Unexpected value (%r) for mmap option -- assuming default' % mmap_opt)
-        fmt_opt = options.formatting | (cmd in ('xfc', ))
+        fmt_opt = options.formatting | (cmd in ('xfc', 'colx'))
         gc_mode = options.gc
         if gc_mode:
             gc.disable()
@@ -367,6 +394,8 @@ if __name__ == "__main__":
                     show_labels(bk)
                 elif cmd == 'xfc':
                     count_xfs(bk)
+                elif cmd == 'colx':
+                    show_column_export(bk)
                 else:
                     print("*** Unknown command <%s>" % cmd)
                     sys.exit(1)

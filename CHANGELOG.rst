@@ -1,6 +1,21 @@
 Changes
 =======
 
+Unreleased
+----------
+
+- Add ``xlrd.columnexport``: numeric column export with format evidence.
+  Each record reports the effective XF index, the ``FORMAT`` record key
+  (built-in vs custom), the condition-selected number format section and
+  whether it carries a genuine percent marker. Percent signs inside
+  quoted text or introduced by an escape are treated as literal text and
+  do not scale the stored value. Records whose stored value has a unique
+  unit meaning are auto-converted (ratio ``0.1`` -> ``10.0``); ambiguous
+  records keep their raw value and A1 coordinate for manual review.
+- Add a ``colx`` command to ``scripts/runxlrd.py``.
+- Fix ``scripts/runxlrd.py`` referencing the removed ``xlrd.USE_MMAP``
+  constant, which made every command fail under xlrd 2.x.
+
 2.0.2 (14 June 2025)
 --------------------
 

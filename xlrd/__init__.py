@@ -13,6 +13,10 @@ from .biffh import (
     error_text_from_code,
 )
 from .book import Book, colname, open_workbook_xls
+from .columnexport import (
+    CellFormatBasis, ColumnExport, NumberFormatSection, cell_format_basis,
+    export_columns, parse_number_format,
+)
 from .compdoc import SIGNATURE as XLS_SIGNATURE
 from .formula import *  # is constrained by __all__
 from .info import __VERSION__, __version__

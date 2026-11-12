@@ -19,6 +19,12 @@ xlrd.book
 .. automodule:: xlrd.book
    :members:
 
+xlrd.columnexport
+-----------------
+
+.. automodule:: xlrd.columnexport
+   :members:
+
 xlrd.compdoc
 ------------
 
