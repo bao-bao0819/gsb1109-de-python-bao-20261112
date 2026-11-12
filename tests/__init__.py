@@ -406,6 +406,136 @@ class CacheTestMixin(SimplifiedTestCaseProtocol):
 
         self._test_getsizeof(Cache(maxsize=3))
 
+    def test_getblocks_shared(self):
+        cache = self.Cache(maxsize=10, getblocks=lambda value: value)
+
+        cache[1] = [("a", 4)]
+        cache[2] = [("a", 4), ("b", 3)]
+        # the shared block is counted only once
+        self.assertEqual(2, len(cache))
+        self.assertEqual(7, cache.currsize)
+
+    def test_getblocks_last_holder(self):
+        cache = self.Cache(maxsize=10, getblocks=lambda value: value)
+
+        cache[1] = [("a", 6)]
+        cache[2] = [("a", 6)]
+        self.assertEqual(6, cache.currsize)
+
+        # a block is still counted while it has holders
+        del cache[1]
+        self.assertEqual(6, cache.currsize)
+        self.assertEqual([("a", 6)], cache[2])
+
+        del cache[2]
+        self.assertEqual(0, cache.currsize)
+
+    def test_getblocks_replace(self):
+        cache = self.Cache(maxsize=10, getblocks=lambda value: value)
+
+        cache[1] = [("a", 4)]
+        cache[2] = [("a", 4)]
+        cache[1] = [("b", 2)]
+        self.assertEqual(6, cache.currsize)
+        self.assertEqual([("b", 2)], cache[1])
+
+        # replacing the last holder releases the block
+        cache[2] = [("c", 1)]
+        self.assertEqual(3, cache.currsize)
+
+    def test_getblocks_evict(self):
+        cache = self.Cache(maxsize=10, getblocks=lambda value: value)
+
+        cache[1] = [("a", 5), ("b", 5)]
+        cache[2] = [("a", 5)]
+        self.assertEqual(10, cache.currsize)
+
+        cache[3] = [("c", 6)]
+        self.assertIn(3, cache)
+        self.assertTrue(cache.currsize <= cache.maxsize)
+        # currsize accounts for exactly the blocks still held
+        blocks = {}
+        for key in cache:
+            for bid, bsize in cache[key]:
+                blocks[bid] = bsize
+        self.assertEqual(sum(blocks.values()), cache.currsize)
+
+    def test_getblocks_value_too_large(self):
+        cache = self.Cache(maxsize=10, getblocks=lambda value: value)
+
+        cache[1] = [("a", 6)]
+        with self.assertRaises(ValueError):
+            cache[1] = [("b", 11)]
+        # the original entry is still cached
+        self.assertEqual([("a", 6)], cache[1])
+        self.assertEqual(6, cache.currsize)
+
+        with self.assertRaises(ValueError):
+            cache[2] = [("b", 11)]
+        self.assertNotIn(2, cache)
+        self.assertEqual(1, len(cache))
+        self.assertEqual(6, cache.currsize)
+
+    def test_getblocks_conflicting_size(self):
+        cache = self.Cache(maxsize=10, getblocks=lambda value: value)
+
+        cache[1] = [("a", 6)]
+        with self.assertRaises(ValueError) as cm:
+            cache[2] = [("a", 7)]
+        self.assertIn("'a'", str(cm.exception))
+        self.assertNotIn(2, cache)
+        self.assertEqual(6, cache.currsize)
+
+        # conflicting sizes within a single value are also detected
+        with self.assertRaises(ValueError) as cm:
+            cache[3] = [("b", 1), ("b", 2)]
+        self.assertIn("'b'", str(cm.exception))
+        self.assertNotIn(3, cache)
+
+    def test_getblocks_negative(self):
+        cache = self.Cache(maxsize=10, getblocks=lambda value: value)
+
+        with self.assertRaises(ValueError):
+            cache[1] = [("a", -1)]
+        self.assertEqual(0, len(cache))
+        self.assertEqual(0, cache.currsize)
+
+    def test_getblocks_none(self):
+        cache = self.Cache(maxsize=2, getblocks=lambda value: None)
+
+        cache[1] = 1
+        cache[2] = 2
+        self.assertEqual(2, len(cache))
+        self.assertEqual(0, cache.currsize)
+
+    def test_getblocks_getsizeof_mutually_exclusive(self):
+        with self.assertRaises(ValueError):
+            self.Cache(maxsize=10, getsizeof=lambda v: 1, getblocks=lambda v: [])
+
+    def test_getblocks_subclass(self):
+        class Cache(self.Cache):
+            @staticmethod
+            def getblocks(value):
+                return value
+
+        cache = Cache(maxsize=10)
+        cache[1] = [("a", 4)]
+        cache[2] = [("a", 4), ("b", 3)]
+        self.assertEqual(7, cache.currsize)
+
+    def test_getblocks_clear(self):
+        cache = self.Cache(maxsize=10, getblocks=lambda value: value)
+
+        cache[1] = [("a", 6)]
+        cache[2] = [("a", 6)]
+        cache.clear()
+        self.assertEqual(0, len(cache))
+        self.assertEqual(0, cache.currsize)
+
+        # verify cache can be reused after clear
+        cache[3] = [("a", 6)]
+        self.assertEqual(6, cache.currsize)
+
     def test_clear(self):
         cache = self.Cache(maxsize=2)
         cache.update({1: 1, 2: 2})

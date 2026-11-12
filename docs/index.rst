@@ -54,6 +54,21 @@ named constructor parameter `getsizeof`, which may specify a callable
 item's value.  An item whose size exceeds :attr:`~Cache.maxsize`
 cannot be stored, and trying to do so raises :exc:`ValueError`.
 
+When cached items share common data, e.g. multiple reports referencing
+the same columnar data blocks, per-item sizes would count the shared
+data multiple times.  All cache classes therefore also accept an
+optional named constructor parameter `getblocks`, which may specify a
+callable ``getblocks(value)`` returning an iterable of
+``(block_id, size)`` pairs, where `block_id` is an immutable
+identifier of a shared data block and `size` its non-negative size in
+bytes.  Each block is then counted towards the cache's size only once,
+for as long as at least one cached item references it.  `getblocks`
+and `getsizeof` are mutually exclusive.  Reporting different sizes for
+the same block identifier raises :exc:`ValueError`.
+
+.. versionadded:: 8.1
+   The `getblocks` constructor parameter.
+
 The values of a :class:`Cache` are mutable by default, as are e.g. the
 values of a :class:`dict`.  It is the user's responsibility to take
 care that cached values are not accidentally modified.  This is
@@ -68,8 +83,8 @@ inserted into the cache.
    synchronized, e.g. by using one of the memoizing decorators with a
    suitable `lock` object.
 
-.. autoclass:: Cache(maxsize, getsizeof=None)
-   :members: currsize, getsizeof, maxsize
+.. autoclass:: Cache(maxsize, getsizeof=None, getblocks=None)
+   :members: currsize, getblocks, getsizeof, maxsize
 
    This class discards arbitrary items using :meth:`popitem` to make
    space when necessary.  Derived classes may override :meth:`popitem`
@@ -88,7 +103,7 @@ inserted into the cache.
       different :mod:`cachetools` version than the one it was pickled
       with.
 
-.. autoclass:: FIFOCache(maxsize, getsizeof=None)
+.. autoclass:: FIFOCache(maxsize, getsizeof=None, getblocks=None)
    :members: popitem
 
    This class evicts items in the order they were added to make space
@@ -98,7 +113,7 @@ inserted into the cache.
    like a re-insertion, i.e. deleting the item followed by an insert,
    and therefore will reset the item's position in the cache.
 
-.. autoclass:: LFUCache(maxsize, getsizeof=None)
+.. autoclass:: LFUCache(maxsize, getsizeof=None, getblocks=None)
    :members: popitem
 
    This class counts how often an item is retrieved, and discards the
@@ -114,13 +129,13 @@ inserted into the cache.
       Switched to discarding the least recently used item in case of
       a tie.  Previously, an arbitrary item was discarded.
 
-.. autoclass:: LRUCache(maxsize, getsizeof=None)
+.. autoclass:: LRUCache(maxsize, getsizeof=None, getblocks=None)
    :members: popitem
 
    This class discards the least recently used items first to make
    space when necessary.
 
-.. autoclass:: RRCache(maxsize, choice=random.choice, getsizeof=None)
+.. autoclass:: RRCache(maxsize, choice=random.choice, getsizeof=None, getblocks=None)
    :members: choice, popitem
 
    This class randomly selects candidate items and discards them to
@@ -131,7 +146,7 @@ inserted into the cache.
    an alternative function that returns an arbitrary element from a
    non-empty sequence.
 
-.. autoclass:: TTLCache(maxsize, ttl, timer=time.monotonic, getsizeof=None)
+.. autoclass:: TTLCache(maxsize, ttl, timer=time.monotonic, getsizeof=None, getblocks=None)
    :members: popitem, timer, ttl
 
    This class associates a time-to-live value with each item.  Items
@@ -172,7 +187,7 @@ inserted into the cache.
 
       :returns: An iterable of expired `(key, value)` pairs.
 
-.. autoclass:: TLRUCache(maxsize, ttu, timer=time.monotonic, getsizeof=None)
+.. autoclass:: TLRUCache(maxsize, ttu, timer=time.monotonic, getsizeof=None, getblocks=None)
    :members: popitem, timer, ttu
 
    Similar to :class:`TTLCache`, this class also associates an

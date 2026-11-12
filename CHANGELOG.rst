@@ -1,3 +1,10 @@
+v8.1.0 (unreleased)
+===================
+
+- Add optional ``getblocks`` parameter to all cache classes for size
+  accounting of values that share immutable data blocks.
+
+
 v8.0.0 (2026-11-06)
 ===================
 

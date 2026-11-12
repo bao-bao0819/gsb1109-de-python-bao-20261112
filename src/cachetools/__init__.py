@@ -32,13 +32,23 @@ class Cache(collections.abc.MutableMapping):
 
     __size = None
 
-    def __init__(self, maxsize, getsizeof=None):
+    __blocks = None
+
+    def __init__(self, maxsize, getsizeof=None, getblocks=None):
         if maxsize < 0:
             raise ValueError("maxsize must be non-negative")
         if getsizeof is not None:
             self.getsizeof = getsizeof
+        if getblocks is not None:
+            self.getblocks = getblocks
         if self.getsizeof is not Cache.getsizeof:
+            if self.getblocks is not Cache.getblocks:
+                raise ValueError("getsizeof and getblocks are mutually exclusive")
             self.__size = {}
+        elif self.getblocks is not Cache.getblocks:
+            self.__blocks = {}
+            self.__blockrefs = {}
+            self.__blocksizes = {}
         self.__data = {}
         self.__currsize = 0
         self.__maxsize = maxsize
@@ -61,7 +71,20 @@ class Cache(collections.abc.MutableMapping):
         data = self.__data
         size = self.__size
         maxsize = self.__maxsize
-        if size is None:
+        blocks = self.__blocks
+        if blocks is not None:
+            itemblocks = self.__getblocks(value)
+            if sum(itemblocks.values()) > maxsize:
+                raise ValueError("value too large")
+            while self.__currsize + self.__blockdiff(key, itemblocks) > maxsize:
+                self.popitem()
+            old = blocks.pop(key, None)
+            if old is not None:
+                self.__release(old)
+            data[key] = value
+            blocks[key] = itemblocks
+            self.__acquire(itemblocks)
+        elif size is None:
             if maxsize < 1:
                 raise ValueError("value too large")
             elif key in data:
@@ -93,7 +116,12 @@ class Cache(collections.abc.MutableMapping):
 
     def __delitem__(self, key):
         size = self.__size
-        if size is None:
+        blocks = self.__blocks
+        if blocks is not None:
+            itemblocks = blocks.pop(key)
+            del self.__data[key]
+            self.__release(itemblocks)
+        elif size is None:
             del self.__data[key]
             self.__currsize -= 1
         else:
@@ -152,6 +180,10 @@ class Cache(collections.abc.MutableMapping):
         size = self.__size
         if size is not None:
             size.clear()
+        blocks = self.__blocks
+        if blocks is not None:
+            blocks.clear()
+            self.__blockrefs.clear()
         self.__data.clear()
         self.__currsize = 0
 
@@ -170,12 +202,85 @@ class Cache(collections.abc.MutableMapping):
         """Return the size of a cache element's value."""
         return 1
 
+    @staticmethod
+    def getblocks(value):
+        """Return the shared blocks of a cache element's value as an
+        iterable of ``(block_id, size)`` pairs, or `None`.
+
+        Each `block_id` must be an immutable, hashable identifier of a
+        data block shared between cache items, and `size` its
+        non-negative size.  A block is counted towards the cache's size
+        only once, as long as at least one cached item references it.
+        The default implementation returns `None`, disabling shared
+        block accounting.
+
+        """
+        return None
+
+    def __getblocks(self, value):
+        pairs = self.getblocks(value)
+        blocks = {}
+        if pairs is None:
+            return blocks
+        sizes = self.__blocksizes
+        for bid, bsize in pairs:
+            if bsize < 0:
+                raise ValueError("value size must be non-negative")
+            known = blocks.get(bid, sizes.get(bid))
+            if known is not None and known != bsize:
+                raise ValueError(
+                    "block %r reported with conflicting sizes %r and %r"
+                    % (bid, known, bsize)
+                )
+            blocks[bid] = bsize
+        return blocks
+
+    def __blockdiff(self, key, blocks):
+        old = self.__blocks.get(key)
+        refs = self.__blockrefs
+        diff = 0
+        for bid, bsize in blocks.items():
+            if old is not None and bid in old:
+                continue
+            if bid not in refs:
+                diff += bsize
+        if old is not None:
+            for bid, bsize in old.items():
+                if bid not in blocks and refs[bid] == 1:
+                    diff -= bsize
+        return diff
+
+    def __acquire(self, blocks):
+        refs = self.__blockrefs
+        sizes = self.__blocksizes
+        currsize = self.__currsize
+        for bid, bsize in blocks.items():
+            sizes[bid] = bsize
+            if bid in refs:
+                refs[bid] += 1
+            else:
+                refs[bid] = 1
+                currsize += bsize
+        self.__currsize = currsize
+
+    def __release(self, blocks):
+        refs = self.__blockrefs
+        currsize = self.__currsize
+        for bid, bsize in blocks.items():
+            count = refs[bid] - 1
+            if count > 0:
+                refs[bid] = count
+            else:
+                del refs[bid]
+                currsize -= bsize
+        self.__currsize = currsize
+
 
 class FIFOCache(Cache):
     """First In First Out (FIFO) cache implementation."""
 
-    def __init__(self, maxsize, getsizeof=None):
-        Cache.__init__(self, maxsize, getsizeof)
+    def __init__(self, maxsize, getsizeof=None, getblocks=None):
+        Cache.__init__(self, maxsize, getsizeof, getblocks)
         self.__order = collections.OrderedDict()
 
     def __setitem__(self, key, value, cache_setitem=Cache.__setitem__):
@@ -221,8 +326,8 @@ class LFUCache(Cache):
             prev.next = next
             next.prev = prev
 
-    def __init__(self, maxsize, getsizeof=None):
-        Cache.__init__(self, maxsize, getsizeof)
+    def __init__(self, maxsize, getsizeof=None, getblocks=None):
+        Cache.__init__(self, maxsize, getsizeof, getblocks)
         self.__root = root = LFUCache._Link(0)  # sentinel
         root.prev = root.next = root
         self.__links = {}
@@ -294,8 +399,8 @@ class LFUCache(Cache):
 class LRUCache(Cache):
     """Least Recently Used (LRU) cache implementation."""
 
-    def __init__(self, maxsize, getsizeof=None):
-        Cache.__init__(self, maxsize, getsizeof)
+    def __init__(self, maxsize, getsizeof=None, getblocks=None):
+        Cache.__init__(self, maxsize, getsizeof, getblocks)
         self.__order = collections.OrderedDict()
 
     def __getitem__(self, key, cache_getitem=Cache.__getitem__):
@@ -340,8 +445,8 @@ class LRUCache(Cache):
 class RRCache(Cache):
     """Random Replacement (RR) cache implementation."""
 
-    def __init__(self, maxsize, choice=random.choice, getsizeof=None):
-        Cache.__init__(self, maxsize, getsizeof)
+    def __init__(self, maxsize, choice=random.choice, getsizeof=None, getblocks=None):
+        Cache.__init__(self, maxsize, getsizeof, getblocks)
         self.__choice = choice
         self.__index = {}
         self.__keys = []
@@ -413,8 +518,8 @@ class _TimedCache(Cache):
         def __getattr__(self, name):
             return getattr(self.__timer, name)
 
-    def __init__(self, maxsize, timer, getsizeof=None):
-        Cache.__init__(self, maxsize, getsizeof)
+    def __init__(self, maxsize, timer, getsizeof=None, getblocks=None):
+        Cache.__init__(self, maxsize, getsizeof, getblocks)
         self.__timer = _TimedCache._Timer(timer)
 
     def __repr__(self, cache_repr=Cache.__repr__):
@@ -479,8 +584,10 @@ class TTLCache(_TimedCache):
             prev.next = next
             next.prev = prev
 
-    def __init__(self, maxsize, ttl, timer=time.monotonic, getsizeof=None):
-        _TimedCache.__init__(self, maxsize, timer, getsizeof)
+    def __init__(
+        self, maxsize, ttl, timer=time.monotonic, getsizeof=None, getblocks=None
+    ):
+        _TimedCache.__init__(self, maxsize, timer, getsizeof, getblocks)
         self.__root = root = TTLCache._Link()
         root.prev = root.next = root
         self.__links = collections.OrderedDict()
@@ -619,8 +726,10 @@ class TLRUCache(_TimedCache):
         def __lt__(self, other):
             return self.expires < other.expires
 
-    def __init__(self, maxsize, ttu, timer=time.monotonic, getsizeof=None):
-        _TimedCache.__init__(self, maxsize, timer, getsizeof)
+    def __init__(
+        self, maxsize, ttu, timer=time.monotonic, getsizeof=None, getblocks=None
+    ):
+        _TimedCache.__init__(self, maxsize, timer, getsizeof, getblocks)
         self.__items = collections.OrderedDict()
         self.__order = []
         self.__ttu = ttu

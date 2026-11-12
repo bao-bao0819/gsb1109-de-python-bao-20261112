@@ -1,5 +1,5 @@
 import random
-from collections.abc import Callable, Iterator, MutableMapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, MutableMapping, Sequence
 from contextlib import AbstractContextManager
 from typing import (
     Any,
@@ -40,7 +40,10 @@ _TT = TypeVar("_TT", default=float)
 
 class Cache(MutableMapping[_KT, _VT]):
     def __init__(
-        self, maxsize: float, getsizeof: Callable[[_VT], float] | None = None
+        self,
+        maxsize: float,
+        getsizeof: Callable[[_VT], float] | None = None,
+        getblocks: Callable[[_VT], Iterable[tuple[Any, float]] | None] | None = None,
     ) -> None: ...
     def __getitem__(self, key: _KT) -> _VT: ...
     def __setitem__(self, key: _KT, value: _VT) -> None: ...
@@ -64,6 +67,8 @@ class Cache(MutableMapping[_KT, _VT]):
     def currsize(self) -> float: ...
     @staticmethod
     def getsizeof(value: _VT) -> float: ...
+    @staticmethod
+    def getblocks(value: _VT) -> Iterable[tuple[Any, float]] | None: ...
 
 class FIFOCache(Cache[_KT, _VT]): ...
 class LFUCache(Cache[_KT, _VT]): ...
@@ -75,6 +80,7 @@ class RRCache(Cache[_KT, _VT]):
         maxsize: float,
         choice: Callable[[Sequence[_KT]], _KT] = random.choice,
         getsizeof: Callable[[_VT], float] | None = None,
+        getblocks: Callable[[_VT], Iterable[tuple[Any, float]] | None] | None = None,
     ) -> None: ...
     @property
     def choice(self) -> Callable[[Sequence[_KT]], _KT]: ...
@@ -85,6 +91,7 @@ class _TimedCache(Cache[_KT, _VT], Generic[_KT, _VT, _TT]):
         maxsize: float,
         timer: Callable[[], _TT],
         getsizeof: Callable[[_VT], float] | None = None,
+        getblocks: Callable[[_VT], Iterable[tuple[Any, float]] | None] | None = None,
     ) -> None: ...
 
     class _Timer(AbstractContextManager[_T]):
@@ -105,6 +112,7 @@ class TTLCache(_TimedCache[_KT, _VT, _TT]):
         ttl: float,
         *,
         getsizeof: Callable[[_VT], float] | None = None,
+        getblocks: Callable[[_VT], Iterable[tuple[Any, float]] | None] | None = None,
     ) -> None: ...
     @overload
     def __init__(
@@ -113,6 +121,7 @@ class TTLCache(_TimedCache[_KT, _VT, _TT]):
         ttl: Any,  # must be "addable" to _TT
         timer: Callable[[], _TT],
         getsizeof: Callable[[_VT], float] | None = None,
+        getblocks: Callable[[_VT], Iterable[tuple[Any, float]] | None] | None = None,
     ) -> None: ...
     @property
     def ttl(self) -> Any: ...
@@ -126,6 +135,7 @@ class TLRUCache(_TimedCache[_KT, _VT, _TT]):
         ttu: Callable[[_KT, _VT, float], float],
         *,
         getsizeof: Callable[[_VT], float] | None = None,
+        getblocks: Callable[[_VT], Iterable[tuple[Any, float]] | None] | None = None,
     ) -> None: ...
     @overload
     def __init__(
@@ -134,6 +144,7 @@ class TLRUCache(_TimedCache[_KT, _VT, _TT]):
         ttu: Callable[[_KT, _VT, _TT], _TT],
         timer: Callable[[], _TT],
         getsizeof: Callable[[_VT], float] | None = None,
+        getblocks: Callable[[_VT], Iterable[tuple[Any, float]] | None] | None = None,
     ) -> None: ...
     @property
     def ttu(self) -> Callable[[_KT, _VT, _TT], _TT]: ...
