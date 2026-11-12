@@ -16,6 +16,16 @@ from .formatter import (
     FORMAT_W3C,
 )
 from .parser import ParserError
+from .sampling import (
+    HourStratum,
+    Sample,
+    SamplingPlan,
+    StratumShortfall,
+    daily_ranges,
+    replay_range,
+    stratified_plan,
+    stratified_sample,
+)
 
 # https://mypy.readthedocs.io/en/stable/command_line.html#cmdoption-mypy-no-implicit-reexport
 # Mypy with --strict or --no-implicit-reexport requires an explicit reexport.
@@ -38,4 +48,12 @@ __all__ = [
     "FORMAT_RSS",
     "FORMAT_W3C",
     "ParserError",
+    "HourStratum",
+    "Sample",
+    "SamplingPlan",
+    "StratumShortfall",
+    "daily_ranges",
+    "replay_range",
+    "stratified_plan",
+    "stratified_sample",
 ]

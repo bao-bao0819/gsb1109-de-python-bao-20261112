@@ -1,6 +1,11 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+- [ADDED] Added ``arrow.sampling`` with stratified uniform sampling over time ranges: local-hour strata (repeated fall-back hours are independent strata, skipped spring-forward hours yield none), budget allocation proportional to true durations with per-stratum bounds and UTC-order tie-breaking, deterministic seeds, per-day replay of the global allocation table, and shortfall reporting.
+
 1.4.0 (2025-10-18)
 ------------------
 
