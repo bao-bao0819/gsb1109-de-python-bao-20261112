@@ -300,6 +300,128 @@ the memoizing decorators described below.  However, it may be useful
 in its own right.
 
 
+Source-aware caches
+====================
+
+.. module:: cachetools.source
+
+Sometimes the absence of data is itself a result worth caching, but
+only once the underlying data source is complete.  Consider a service
+that reads collection manifests per day:  the answer "this device has
+no data today" is only trustworthy after that day's manifest has been
+fully processed, and it must be discarded if the manifest is later
+reopened.  :class:`SourceCache` stores such empty results together
+with completion markers, while ordinary positive results are cached
+without that restriction.
+
+A source is marked complete with :meth:`~SourceCache.seal`, which
+returns an immutable :class:`Generation` marker.  Before the source
+is sealed, a lookup simply misses and nothing empty is remembered:
+
+.. doctest::
+
+   >>> from cachetools.source import SourceCache
+
+   >>> devices = SourceCache()
+   >>> devices.get_hit("device-1") is None
+   True
+
+   >>> monday = devices.seal("2026-11-12")
+   >>> devices.store_empty("device-1", monday)
+   >>> hit = devices.get_hit("device-1")
+   >>> hit.empty
+   True
+   >>> hit.value is None
+   True
+   >>> hit.generations == (monday,)
+   True
+
+An empty result can only be stored against markers of sealed
+sources.  Without a marker, :meth:`~SourceCache.store_empty` raises
+:exc:`ValueError`, so a miss while a manifest is still processed is
+returned to the caller as empty but is not remembered until the
+manifest is sealed:
+
+.. doctest::
+
+   >>> fresh = SourceCache()
+   >>> try:
+   ...     fresh.store_empty("device-9")
+   ... except ValueError:
+   ...     print("rejected")
+   rejected
+
+Positive results are stored with :meth:`~SourceCache.store_value`.
+They may record where they came from, but are never invalidated when
+a source is reopened:
+
+.. doctest::
+
+   >>> devices.store_value("device-2", "payload", monday)
+   >>> positive = devices.get_hit("device-2")
+   >>> positive.empty
+   False
+   >>> positive.value
+   'payload'
+
+When a source is reopened with :meth:`~SourceCache.withdraw`, every
+empty result depending on it is invalidated and its keys are
+returned.  Empty results based on other sources, and all positive
+results, stay valid:
+
+.. doctest::
+
+   >>> tuesday = devices.seal("2026-11-13")
+   >>> devices.store_empty("device-3", tuesday)
+   >>> devices.withdraw("2026-11-12") == ("device-1",)
+   True
+   >>> devices.get_hit("device-1") is None
+   True
+   >>> devices.get_hit("device-3").generations == (tuesday,)
+   True
+   >>> devices.get_value("device-2")
+   'payload'
+
+Sealing a source again starts a new generation.  Markers from older
+or withdrawn generations are rejected, since an empty result built on
+them is no longer confirmed:
+
+.. doctest::
+
+   >>> try:
+   ...     devices.store_empty("device-1", monday)
+   ... except ValueError:
+   ...     print("rejected")
+   rejected
+   >>> remade = devices.seal("2026-11-12")
+   >>> devices.store_empty("device-1", remade)
+
+Each :class:`Hit` therefore states exactly which generation(s) a read
+is based on, letting callers distinguish positive results from
+confirmed empty results and tell the manifest generations apart.
+
+An empty result may depend on several sources at once;  it is
+invalidated when any of them is withdrawn.  The underlying key/value
+store is a regular :class:`~cachetools.Cache`, selected through
+`cache_factory`, so size limits together with eviction or expiry
+policies keep working.  Evicted and expired records have their
+dependency tracking cleaned up automatically.
+
+.. autoclass:: Generation
+   :members:
+
+.. autoclass:: SourceCacheRecord
+   :members:
+
+.. autoclass:: Hit
+   :members:
+
+.. autoclass:: SourceCache(maxsize=inf, *, cache_factory=Cache)
+   :members:
+
+
+.. currentmodule:: cachetools
+
 Memoizing decorators
 ====================
 
