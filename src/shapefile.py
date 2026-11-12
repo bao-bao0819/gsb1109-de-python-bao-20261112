@@ -22,7 +22,14 @@ import tempfile
 import time
 import warnings
 import zipfile
-from collections.abc import Container, Iterable, Iterator, Reversible, Sequence
+from collections.abc import (
+    Container,
+    Iterable,
+    Iterator,
+    Mapping,
+    Reversible,
+    Sequence,
+)
 from contextlib import AbstractContextManager, ExitStack
 from datetime import date, datetime
 from os import PathLike
@@ -61,6 +68,11 @@ logger = logging.getLogger(__name__)
 VERBOSE = True
 
 IS_WINDOWS = sys.platform == "win32"
+
+
+def _normalise_encoding_name(encoding: str) -> str:
+    return encoding.lower().replace("-", "_").strip()
+
 
 # Constants for shape types
 NULL = 0
@@ -167,6 +179,19 @@ class CorruptDbfRecord(Warning):
 
 class PossibleDataLoss(Warning):
     """A Warning of possible data loss when encoding or decoding."""
+
+
+class FieldMappingConflict(dbfFileException):
+    """A long field name cannot be bound to a short dbf field name that is
+    already published in the shared FieldNameRegistry under a different
+    long name.  Existing published bindings are never reassigned, so the
+    conflicting (usually newer) field must be manually rebound instead.
+    """
+
+
+class FieldMappingError(dbfFileException):
+    """A field mapping cannot be applied to a .dbf (e.g. it does not cover
+    every field, or the stored short names no longer match)."""
 
 
 class UnsuccessfulFileDownload(Warning):
@@ -722,6 +747,350 @@ class Field(NamedTuple):
 
     def __repr__(self) -> str:
         return f'Field(name="{self.name}", field_type=FieldType.{self.field_type}, size={self.size}, decimal={self.decimal})'
+
+
+# Maximum byte length of a dbf field name (the 11th byte in the descriptor
+# is the null terminator, so only 10 bytes are available).
+DBF_FIELD_NAME_SIZE: Final = 10
+
+
+def encode_field_name(
+    name: str,
+    encoding: str = "utf8",
+    encodingErrors: str = "strict",
+    strict: bool = False,
+) -> tuple[bytes, str]:
+    """Encodes a long source field name down to the dbf field-name limit.
+
+    Truncation always happens on a code-point boundary (never halfway
+    through a multi-byte character), reusing the same logic as
+    :meth:`Field.trim_name_until_encodable`.  Returns the null-padded
+    10 byte descriptor name and the decoded short name it corresponds to.
+    """
+    return _encode_dbf_string(
+        s=name,
+        size=DBF_FIELD_NAME_SIZE,
+        decode=Field.decode_name,
+        pad_byte=b"\x00",
+        encoding=encoding,
+        encodingErrors=encodingErrors,
+        strict=strict,
+    )
+
+
+class FieldNameRegistry:
+    """A shared, cross-partition registry binding long source field names to
+    the at most 10 byte field names that dbf (and therefore shapefile)
+    headers can store.
+
+    Different source tables can hold different long names that, once encoded
+    and truncated under the target encoding, collide on the same short dbf
+    name.  The registry keeps one stable short name per long name so that:
+
+      * a long name already published in an earlier partition keeps its
+        binding (existing columns never change identity);
+      * every new long name receives a short name not yet in use;
+      * bindings are deterministic: re-registering the same long name under
+        the same encoding always returns the same short name.
+
+    The registry itself stores text only; serialise it with
+    :meth:`FieldNameRegistry.to_mapping` and persist the result alongside the
+    output tables.  Another process only needs that mapping and the output
+    .dbf to reconstruct the original long names, encoding and field types
+    (see :func:`restore_field_names`).
+    """
+
+    def __init__(self, encoding: str = "utf-8") -> None:
+        self.encoding = encoding
+        # long source name -> published short dbf name
+        self._long_to_short: dict[str, str] = {}
+        # published short dbf name -> long source name
+        self._short_to_long: dict[str, str] = {}
+        # long names whose published short name is their own natural
+        # truncation (rather than a collision-avoidance prefix or suffix).
+        # Only these bindings can be checked for encoding drift.
+        self._natural_bindings: set[str] = set()
+
+    @property
+    def bindings(self) -> dict[str, str]:
+        """A copy of the current ``{long_name: short_name}`` bindings."""
+        return dict(self._long_to_short)
+
+    def __len__(self) -> int:
+        return len(self._long_to_short)
+
+    def __contains__(self, long_name: object) -> bool:
+        return long_name in self._long_to_short
+
+    @classmethod
+    def from_mapping(
+        cls,
+        mapping: Mapping[str, str],
+        *,
+        encoding: str = "utf-8",
+    ) -> FieldNameRegistry:
+        """Rebuilds a registry from a previously serialised mapping of
+        long source names to published short dbf names.
+
+        Raises :class:`FieldMappingConflict` if the mapping itself contains
+        two long names bound to the same short name.
+        """
+        registry = cls(encoding=encoding)
+        for long_name, short_name in mapping.items():
+            if not isinstance(long_name, str) or not isinstance(short_name, str):
+                raise FieldMappingError(
+                    "Field mapping must map string long names to string short "
+                    f"dbf names. Got: {long_name!r} -> {short_name!r}."
+                )
+            previous = registry._short_to_long.get(short_name)
+            if previous is not None and previous != long_name:
+                raise FieldMappingConflict(
+                    f"Cannot load field mapping: short name {short_name!r} is bound "
+                    f"to both {previous!r} and {long_name!r}."
+                )
+            registry._long_to_short[long_name] = short_name
+            registry._short_to_long[short_name] = long_name
+            # Loaded bindings are externally published and immutable; their
+            # natural-truncation status is unknown, so drift is not checked.
+        return registry
+
+    def to_mapping(self) -> dict[str, str]:
+        """Serialises the registry as a plain ``{long_name: short_name}``
+        dict that can be dumped to JSON and shared across partitions."""
+        return dict(self._long_to_short)
+
+    MAPPING_DOCUMENT_VERSION = 1
+
+    def to_document(self) -> dict[str, Any]:
+        """Serialises the registry as a self-contained, JSON-serialisable
+        document carrying the encoding alongside the bindings.  Persist this
+        next to the output tables: together with a .dbf it is everything
+        another process needs to reconstruct the source field names (the
+        field types, sizes and decimals are stored in the .dbf itself).
+        """
+        return {
+            "version": self.MAPPING_DOCUMENT_VERSION,
+            "encoding": self.encoding,
+            "fields": self.to_mapping(),
+        }
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, Any]) -> FieldNameRegistry:
+        """Rebuilds a registry from a document produced by
+        :meth:`to_document` (e.g. loaded back from JSON)."""
+        encoding = document.get("encoding", "utf-8")
+        if not isinstance(encoding, str):
+            raise FieldMappingError(
+                f"Field mapping document's 'encoding' must be a string. Got: {encoding!r}"
+            )
+        fields = document.get("fields")
+        if not isinstance(fields, Mapping):
+            raise FieldMappingError(
+                f"Field mapping document must contain a 'fields' mapping of "
+                f"long to short names. Got: {document!r}"
+            )
+        return cls.from_mapping(fields, encoding=encoding)
+
+    def _truncate_to_field_name(
+        self,
+        long_name: str,
+        encodingErrors: str,
+    ) -> tuple[bytes, str]:
+        # Truncation is deliberate and lossless here: the full long name is
+        # preserved by the registry's mapping, so the usual truncation
+        # warnings (and strict errors) are suppressed.  Characters that
+        # cannot be encoded at all still raise via encodingErrors.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", PossibleDataLoss)
+            return encode_field_name(
+                long_name,
+                encoding=self.encoding,
+                encodingErrors=encodingErrors,
+                strict=False,
+            )
+
+    def short_name_for(
+        self,
+        long_name: str,
+        *,
+        encodingErrors: str = "strict",
+    ) -> str:
+        """Returns the stable short dbf name registered for ``long_name``,
+        creating a new binding the first time it is seen.
+
+        The default candidate is simply the long name encoded under the
+        registry's encoding and truncated at a code-point boundary to 10
+        bytes.  On collision with a short name already published for a
+        different long name, progressively shorter prefixes are tried, and
+        as a last resort a ``_<number>`` suffix is appended.
+
+        Truncation itself raises no warning: the original name is retained
+        in the mapping.  Raises :class:`FieldMappingConflict` if a previously
+        published short name can no longer be re-derived from its own long
+        name under the current encoding (a binding that cannot be honoured
+        without renaming an existing column).
+        """
+        existing = self._long_to_short.get(long_name)
+        if existing is not None:
+            # Existing bindings are immutable.  When the published short name
+            # was originally the long name's own natural truncation, re-derive
+            # it to guard against encoding drift; collision-avoidance names
+            # cannot be re-derived and are simply honoured.
+            if long_name in self._natural_bindings:
+                _encoded, candidate = self._truncate_to_field_name(
+                    long_name, encodingErrors
+                )
+                if candidate != existing:
+                    raise FieldMappingConflict(
+                        f"Long field name {long_name!r} is already published as {existing!r}, "
+                        f"but under {self.encoding!r} it now truncates to {candidate!r}. "
+                        "The existing column keeps its identity; resolve the mismatch manually."
+                    )
+            return existing
+
+        candidate, is_natural = self._next_available_short_name(
+            long_name, encodingErrors=encodingErrors
+        )
+        self._long_to_short[long_name] = candidate
+        self._short_to_long[candidate] = long_name
+        if is_natural:
+            self._natural_bindings.add(long_name)
+        return candidate
+
+    def _next_available_short_name(
+        self,
+        long_name: str,
+        *,
+        encodingErrors: str,
+    ) -> tuple[str, bool]:
+        _encoded, truncated = self._truncate_to_field_name(long_name, encodingErrors)
+        # The natural truncation is free: bind it directly when unused.
+        if truncated not in self._short_to_long:
+            return truncated, True
+        # Otherwise try progressively shorter code-point prefixes of the
+        # natural truncation before falling back to generated suffixes.
+        prefix = truncated[:-1]
+        while prefix:
+            if prefix not in self._short_to_long:
+                return prefix, False
+            prefix = prefix[:-1]
+
+        # Every prefix is taken (e.g. several long names share the same
+        # leading characters): generate a stable, collision-free suffix.
+        for number in itertools.count(1):
+            suffix = f"_{number}"
+            base = truncated[: DBF_FIELD_NAME_SIZE - len(suffix)] or "F"
+            candidate = f"{base}{suffix}"
+            if candidate not in self._short_to_long:
+                return candidate, False
+        raise RuntimeError("unreachable")  # pragma: no cover
+
+    def conflict_for(self, long_name: str) -> str | None:
+        """If ``long_name``'s natural truncated name is already published to
+        another long name, returns that incumbent long name (the minimum old
+        column that would have to be manually rebound); otherwise ``None``.
+        """
+        _encoded, truncated = self._truncate_to_field_name(long_name, "strict")
+        incumbent = self._short_to_long.get(truncated)
+        if incumbent is not None and incumbent != long_name:
+            return incumbent
+        return None
+
+    def commit_binding(self, long_name: str, actual_short_name: str) -> bool:
+        """Reconciles a binding with the short name actually stored in the
+        .dbf header.  Field normalisation performed by Field.from_unchecked
+        (e.g. replacing spaces with underscores outside strict mode) can make
+        the on-disk name differ from the registry's candidate; the mapping
+        must point at the real column name for restoration to work.
+
+        The long name keeps exactly one binding.  Returns ``True`` when the
+        mapping was (already) aligned with the actual name, or ``False`` when
+        that short name is published to another long name, in which case the
+        existing collision-free binding is left untouched.
+        """
+        registered = self._long_to_short.get(long_name)
+        if registered == actual_short_name:
+            return True
+        incumbent = self._short_to_long.get(actual_short_name)
+        if incumbent is not None and incumbent != long_name:
+            return False
+        if registered is not None:
+            del self._short_to_long[registered]
+            self._natural_bindings.discard(long_name)
+        self._long_to_short[long_name] = actual_short_name
+        self._short_to_long[actual_short_name] = long_name
+        return True
+
+    def bind_fields(
+        self,
+        fields: Iterable[Field],
+        *,
+        encodingErrors: str = "strict",
+    ) -> list[Field]:
+        """Resolves a short dbf name for every field's long source name and
+        returns new :class:`Field` instances carrying the short names, with
+        field type, size and decimal preserved.
+
+        The input fields are not mutated.  A
+        :class:`FieldMappingConflict` raised for one field names the single
+        incumbent column whose manual rebinding would unblock it.
+        """
+        resolved: list[Field] = []
+        for field in fields:
+            short_name = self.short_name_for(
+                field.name,
+                encodingErrors=encodingErrors,
+            )
+            resolved.append(
+                Field(
+                    name=short_name,
+                    field_type=field.field_type,
+                    size=field.size,
+                    decimal=field.decimal,
+                )
+            )
+        return resolved
+
+
+def restore_field_names(
+    fields: Iterable[Field],
+    mapping: Mapping[str, str],
+) -> list[Field]:
+    """Inverse of :meth:`FieldNameRegistry.bind_fields`: given the fields of
+    an output .dbf (whose names are the short dbf names) and the shared
+    ``{long_name: short_name}`` mapping, returns fields with the original
+    long source names restored, keeping each field's type, size and decimal.
+
+    Raises :class:`FieldMappingError` if a dbf field is not covered by the
+    mapping, or if the mapping is internally inconsistent.
+    """
+    short_to_long: dict[str, str] = {}
+    for long_name, short_name in mapping.items():
+        incumbent = short_to_long.get(short_name)
+        if incumbent is not None and incumbent != long_name:
+            raise FieldMappingError(
+                f"Field mapping is inconsistent: short name {short_name!r} is "
+                f"mapped from both {incumbent!r} and {long_name!r}."
+            )
+        short_to_long[short_name] = long_name
+
+    restored: list[Field] = []
+    for field in fields:
+        original_name = short_to_long.get(field.name)
+        if original_name is None:
+            raise FieldMappingError(
+                f"dbf field {field.name!r} is not covered by the field mapping, "
+                "so its original source name cannot be restored."
+            )
+        restored.append(
+            Field(
+                name=original_name,
+                field_type=field.field_type,
+                size=field.size,
+                decimal=field.decimal,
+            )
+        )
+    return restored
 
 
 RecordValueNotDate = Union[bool, int, float, str]
@@ -3911,6 +4280,17 @@ class Reader(_HasExitStack):
     def data_fields(self) -> list[Field]:
         return self.dbf_reader.data_fields
 
+    def restore_fields(self, mapping: Mapping[str, str]) -> list[Field]:
+        """Restores the original long source field names on this .dbf's
+        fields using the shared ``{long_name: short_name}`` mapping produced
+        by the writing side's :class:`FieldNameRegistry`.
+
+        Only the names are changed; field type, size and decimal are kept.
+        The .dbf on disk is not modified.  Raises :class:`FieldMappingError`
+        if a stored field is not covered by the mapping.
+        """
+        return restore_field_names(self.dbf_reader.data_fields, mapping)
+
     def record(self, i: int = 0, fields: list[str] | None = None) -> _Record | None:
         return self.dbf_reader.record(i, fields)
 
@@ -4365,6 +4745,7 @@ class DbfWriter(_HasCheckedWriteableFile):
         encodingErrors: str = "strict",
         max_num_fields: int = 2046,
         strict: bool = False,
+        field_name_registry: FieldNameRegistry | None = None,
         # Keep kwargs even though unused, to preserve PyShp 2.4 API
         **kwargs: Any,
     ):
@@ -4374,6 +4755,18 @@ class DbfWriter(_HasCheckedWriteableFile):
         self.encodingErrors = encodingErrors
         self.max_num_fields = max_num_fields
         self.strict = strict
+
+        if field_name_registry is not None:
+            if _normalise_encoding_name(
+                field_name_registry.encoding
+            ) != _normalise_encoding_name(encoding):
+                raise ValueError(
+                    f"The field name registry's encoding {field_name_registry.encoding!r} "
+                    f"does not match the DbfWriter's encoding {encoding!r}. "
+                    "Short names derived under one codec may exceed the 10 byte "
+                    "limit under the other, so both must use the same encoding."
+                )
+        self.field_name_registry = field_name_registry
 
         self.fields: list[Field] = []
         self.recNum = 0
@@ -4394,10 +4787,23 @@ class DbfWriter(_HasCheckedWriteableFile):
         size: int = 50,
         decimal: int = 0,
     ) -> None:
-        """Adds a dbf field descriptor to the shapefile."""
+        """Adds a dbf field descriptor to the shapefile.
+
+        If a :class:`FieldNameRegistry` was supplied, the (potentially long)
+        ``name`` is first bound to a stable short dbf name through it.  The
+        original long name stays recoverable from the registry's serialised
+        mapping.  Without a registry, PyShp's historical behaviour (encode
+        and truncate to 10 bytes) applies.
+        """
         if len(self.fields) >= self.max_num_fields:
             raise dbfFileException(
                 f".dbf Shapefile Writer reached maximum number of fields: {self.max_num_fields}."
+            )
+        long_name = name
+        if self.field_name_registry is not None:
+            name = self.field_name_registry.short_name_for(
+                long_name,
+                encodingErrors=self.encodingErrors,
             )
         field = Field.from_unchecked(
             name=name,
@@ -4408,6 +4814,19 @@ class DbfWriter(_HasCheckedWriteableFile):
             encodingErrors=self.encodingErrors,
             strict=self.strict,
         )
+        if self.field_name_registry is not None:
+            # Reconcile with any normalisation (e.g. spaces to underscores)
+            # applied while building the actual on-disk Field.
+            aligned = self.field_name_registry.commit_binding(long_name, field.name)
+            if not aligned:
+                # The normalised on-disk name belongs to another published
+                # column, so writing it would make this long name
+                # unrestorable.  Fail rather than silently break the mapping.
+                raise FieldMappingConflict(
+                    f"Field {long_name!r} would be stored as {field.name!r}, which "
+                    "is already bound to another long field name.  Rename this field "
+                    "or use strict=True to prevent the normalisation."
+                )
         self.fields.append(field)
 
     def _header(self) -> None:
@@ -4951,6 +5370,7 @@ class Writer(_HasExitStack):
         shp: WriteSeekableBinStream | None = None,
         shx: WriteSeekableBinStream | None = None,
         dbf: WriteSeekableBinStream | None = None,
+        field_name_registry: FieldNameRegistry | None = None,
         # Keep kwargs even though unused, to preserve PyShp 2.4 API
         **kwargs: Any,
     ) -> None:
@@ -5005,6 +5425,7 @@ class Writer(_HasExitStack):
                 encoding=encoding,
                 encodingErrors=encodingErrors,
                 strict=strict,
+                field_name_registry=field_name_registry,
             )
             self.exit_stack.enter_context(self._dbf_writer)
 
@@ -5059,6 +5480,11 @@ class Writer(_HasExitStack):
     @strict.setter
     def strict(self, value: bool) -> None:
         self.dbf_writer.strict = value
+
+    @property
+    def field_name_registry(self) -> FieldNameRegistry | None:
+        """The shared registry long field names are bound through, if any."""
+        return self.dbf_writer.field_name_registry
 
     @property
     def recNum(self) -> int:

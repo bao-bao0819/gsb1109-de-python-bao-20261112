@@ -1129,6 +1129,84 @@ to the maximum.  If truncation was necessary, a warning is raised.
  in ††††††††††††...).
  - PyShp warns if a field name is written containing a null character (before encoding).  For users who wish to steer well clear of potential bugs.
 
+## Long Field Names and Cross-Partition Field Mappings
+
+A dbf field name can only hold 10 bytes (the 11th byte is the null
+terminator).  When several source tables (partitions) contain long field
+names, two different long names can encode and truncate to the same short
+dbf name.  To keep columns stable across partitions, PyShp provides a
+`FieldNameRegistry`: one shared registry binds every long source name to a
+unique short dbf name, while remembering the original names.
+
+Create one registry per output dataset and pass the same instance to every
+Writer, including Writers running in separate processes (serialise the
+registry between them):
+
+	>>> import io, json
+	>>> registry = shapefile.FieldNameRegistry("utf-8")
+	>>> dbf = io.BytesIO()
+	>>> writer = shapefile.Writer(dbf=dbf, field_name_registry=registry)
+	>>> writer.field("population_total_2025_census", "N", size=10, decimal=2)
+	>>> writer.field("population_total_2025_estimate", "N", size=10, decimal=2)
+	>>> writer.record(1, 2)
+	>>> writer.close()
+	>>> reader = shapefile.Reader(dbf=dbf)
+	>>> [field.name for field in reader.data_fields]
+	['population', 'populatio']
+	>>> reader.close()
+
+The first long name keeps its natural truncation (`population`); the
+colliding one receives a shorter prefix instead of silently overwriting the
+first column's identity.  Truncation always happens on a code-point
+boundary, never halfway through a multi-byte character, and raises no
+warning because the full name is preserved in the mapping:
+
+	>>> registry.short_name_for("人口普查总量数据字段甲")
+	'人口普'
+
+Serialise the registry to a plain JSON document and share it with the other
+partitions.  The document carries the encoding, so another process only
+needs it plus the output .dbf files:
+
+	>>> document = registry.to_document()
+	>>> document["encoding"]
+	'utf-8'
+	>>> document["fields"]
+	{'population_total_2025_census': 'population', 'population_total_2025_estimate': 'populatio', '人口普查总量数据字段甲': '人口普'}
+
+A later partition loads the already published mapping.  Existing bindings
+are immutable: a new long name that collides with a published short name is
+bound elsewhere instead of changing the old column:
+
+	>>> shared = json.loads(json.dumps(document, ensure_ascii=False))
+	>>> next_registry = shapefile.FieldNameRegistry.from_document(shared)
+	>>> next_registry.short_name_for("population_total_2025_census")
+	'population'
+	>>> next_registry.short_name_for("population_total_2025_provisional")
+	'populati'
+
+If a new name would collide, `conflict_for` reports the single incumbent old
+column whose manual rebinding would unblock it:
+
+	>>> fresh_registry = shapefile.FieldNameRegistry.from_document(shared)
+	>>> fresh_registry.conflict_for("population_total_2025_provisional")
+	'population_total_2025_census'
+
+On the reading side, `Reader.restore_fields` rebuilds the original long
+names from the shared mapping.  Field type, size and decimal live in the
+.dbf itself and are kept unchanged, so the source schema is fully
+reconstructed:
+
+	>>> dbf2 = io.BytesIO()
+	>>> writer2 = shapefile.Writer(dbf=dbf2, field_name_registry=next_registry)
+	>>> writer2.field("population_total_2025_census", "N", size=10, decimal=2)
+	>>> writer2.record(3)
+	>>> writer2.close()
+	>>> reader2 = shapefile.Reader(dbf=dbf2)
+	>>> reader2.restore_fields(shared["fields"])
+	[Field(name="population_total_2025_census", field_type=FieldType.N, size=10, decimal=2)]
+	>>> reader2.close()
+
 ## Reading Large Shapefiles
 
 Despite being a lightweight library, PyShp is designed to be able to read shapefiles of any size, allowing you to work with hundreds of thousands or even millions

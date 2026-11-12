@@ -1,3 +1,7 @@
+VERSION 3.1.9
+2026-11-13
+	* Added FieldNameRegistry plus FieldMappingConflict/FieldMappingError: a shared, cross-partition mapping of long source field names to unique 10 byte dbf field names.  Published bindings keep their identity, truncation stays on code-point boundaries, and Reader.restore_fields reconstructs the original names, encoding and types from the serialised mapping.
+
 VERSION 3.1.8
 2026-11-07
 	* Avoid unnecessary seeks in Reader.iterShapeRecords with a bbox.  Removed lots of deletion field checks (prefer dbfReader.data_fields). Replace two while loops with simpler alternatives.
