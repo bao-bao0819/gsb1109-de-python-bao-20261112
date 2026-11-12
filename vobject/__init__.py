@@ -78,6 +78,7 @@ VObject Overview
 
 from . import icalendar, vcard
 from .base import newFromBehavior, readComponents, readOne
+from .exchange import ExchangeSession
 
 # Package version
 VERSION = "1.0.0"
