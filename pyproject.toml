@@ -1,0 +1,152 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pyshp"
+authors = [
+    {name = "Joel Lawhead", email = "jlawhead@geospatialpython.com"},
+]
+maintainers = [
+    {name = "James Parrott", email = "james@jamesparrott.dev"},
+    {name = "Karim Bahgat", email = "karim.bahgat.norway@gmail.com"},
+]
+readme = "README.md"
+keywords = ["gis", "geospatial", "geographic", "shapefile", "shapefiles"]
+description = "Pure Python read/write support for ESRI Shapefile format"
+license = "MIT"
+license-files = ["LICENSE.TXT"]
+dynamic = ["version"]
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.optional-dependencies]
+stubs=["pyshp-stubs"]
+
+[dependency-groups]
+dev = [
+    {include-group = "lint"},
+    {include-group = "test"}
+]
+lint = [
+    "mypy==1.19.1", # last to support Python 3.9
+    'pre-commit; python_version >= "3.10"',
+    "ruff",
+    "pre-commit-hooks",
+]
+test = [
+    "pytest", "hypothesis", "pytest-timeout"
+]
+
+[tool.uv]
+exclude-dependencies = [
+    { package = { name = "pre-commit" }, dependencies = ["virtualenv"] },
+]
+
+
+[project.urls]
+Repository = "https://github.com/GeospatialPython/pyshp"
+
+[tool.mypy]
+files=["src/shapefile.py"]
+mypy_path = "src"
+explicit_package_bases = true
+exclude_gitignore = true
+exclude=[  # Mypy requires regexes, not globs:
+    'tests/.*\.py',
+]
+
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "tests"]
+
+[tool.hatch.build.targets.wheel]
+only-include = ["src"]
+sources = {"src" = ""}  # move from "src" directory for wheel
+
+[tool.hatch.version]
+path = "src/shapefile.py"
+
+[tool.pytest.ini_options]
+markers = [
+    "network: marks tests requiring network access",
+    "slow: marks other tests that cause bottlenecks",
+    "hypothesis: tests that require hypothesis",
+    "hypothesis_dbf: hypothesis tests that test dbf functionality",
+]
+python_files = "test_*.py *_test.py *_tests.py"
+
+[tool.ruff]
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".ipynb_checkpoints",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "venv",
+    "tests",
+]
+
+# Same as Black.
+line-length = 88
+indent-width = 4
+
+[tool.ruff.lint]
+select = [
+    "E4",  # pycodestyle: Import
+    "E7",  # pycodestyle: Statement
+    "E9",  # pycodestyle: Runtime
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+]
+ignore = []
+
+# Allow fix for all enabled rules (when `--fix`) is provided.
+fixable = ["ALL"]
+unfixable = []
+
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.format]
+# Like Black, use double quotes for strings.
+quote-style = "double"
+
+# Like Black, indent with spaces, rather than tabs.
+indent-style = "space"
+
+# Like Black, respect magic trailing commas.
+skip-magic-trailing-comma = false
+
+# Like Black, automatically detect the appropriate line ending.
+line-ending = "auto"

@@ -1,0 +1,566 @@
+VERSION 3.1.8
+2026-11-07
+	* Avoid unnecessary seeks in Reader.iterShapeRecords with a bbox.  Removed lots of deletion field checks (prefer dbfReader.data_fields). Replace two while loops with simpler alternatives.
+
+VERSION 3.1.7
+2026-11-07
+	* Improved handling of corrupt .shp record headers [@lunnuyenhi-dev] (see [issue 453](https://github.com/GeospatialPython/pyshp/issues/453))
+
+VERSION 3.1.6
+2026-07-25
+	* Encodings can now be read from .cpg files (and optionally written to them).
+
+VERSION 3.1.5
+2026-07-22
+	* Fixed another bug causing dates before the year 1000 to be encoded as less than 8 chars under "%Y%m%d (found by [Thomas Beierlein](https://github.com/GeospatialPython/pyshp/issues/435))
+
+
+VERSION 3.1.4
+2026-06-29
+	* Fix bug causing dates supplied as length 8 strings to be encoded by the custom codec, not ascii
+2026-06-27
+	* Test other codecs (ascii and UTF-8, UTF-16 & UTF-32 so far).
+	* Test all other codecs in CI
+
+VERSION 3.1.3
+
+2026-06-25
+	* Restore faster text writing paths for single-byte Ascii encodings, and Utf-8.
+
+VERSION 3.1.2
+
+2026-06-24
+	* Raise error in strict mode when creating field with a name, or writing strings, that ends with whole code points
+ that whose encoding is pad bytes.
+	* Document handling of unicode.
+
+VERSION 3.1.1
+
+2026-06-24
+	Unicode support made even more robust and yet another encoding bug fixed!
+	* When reading, only use minimum number of pad bytes to decode text successfully (fixes issue 423).
+	* When writing, warn (or raise in strict mode) if the text's encoding ends in pad bytes.
+
+VERSION 3.1.0
+
+2026-06-23
+	Unicode support made more robust and encoding bugs fixed
+	* Truncation of field names and text fields now respects unicode code point boundaries (fixes issues
+	  416 and 148).
+	* Warnings raised if truncation, or replacing b" " with b"_" would corrupt encoded field names,
+	  both if they would either be undecodable, or would silently decode to incorrect data (warns users
+	  if issue 421 applies).
+	* Correctly truncated field names are now stored in field instances, as would actually be seen in the file.
+	* New strict mode.  Writer(strict=True) raises errors or refuse to create fields and text records with data that
+	  would be truncated or cannot be correctly decoded back again by PyShp, exactly as given by the user.
+	* In strict mode, ascii spaces in encoded names are no longer replaced by ascii underscores at all
+	  (work around to avoid corrupting unicode field names - provides opt-in fix for issue 421)
+	* BREAKING. When reading .dbf files, Trailing ascii spaces in text fields before a null terminator char (in the
+	  decoded string) is now removed (i.e. instead of .strip().rstrip('\x00') we now do: .rstrip("\x00").rstrip(" ")).
+	* BREAKING. Enclosing Whitespace other than trailing ascii spaces (0x20) after null chars in text fields is now
+	  preserved, when reading .dbf files (fixes issue 418 - James feels this was a bug.  Let him know if you think otherwise).
+	* BREAKING Trailing null chars other than null terminators & null padding bytes, followed by whitespace other than
+	  ascii spaces, are now preserved
+	* Writing dbf records is now atomic.
+	Testing.
+	* En/decoding of Dbf files and Fields round trips correctly.
+
+
+2026-06-20
+	* API Tweak (small breaking change).  Make ShpWriter.shape return shape length in bytes
+	(the same as for offset) not in 16 bit words.
+	* Include NullShapes in shp round trip test.
+
+VERSION 3.0.13
+
+2026-06-19
+	Bug fix
+	* Fix bug when reading empty shp files.
+
+	Testing
+	* Add round trip tests for Multipatch and shp files (both passed).
+
+
+VERSION 3.0.12
+
+2026-06-05
+	Data consistency
+	* Add Shape.points_2D and Shape.points_3D properties - lists of guaranteed length tuples (2 and 3 respectively).
+
+	Testing
+	* Round trip property-based tests for Polylines and Polygons (both pass).
+
+VERSION 3.0.11
+
+2026-06-04
+	Edge case handling
+	* Raise ShapefileException: i) when creating Non-null Shapes without (or with empty) points
+	  and ii) when creating Null Shapes with non-empty points.
+	* Ensure Shape.z and Shape.partTypes are _Arrays.
+	* Make Shape stricter about its args, e.g. only points or lines, only one point for Points.
+
+	Bug fixes
+	* Multipoints with only a single point, now have their bbox calculated.
+
+	Testing
+	* Round trip property-based tests for Multipoints (passes).
+
+VERSION 3.0.10
+
+2026-06-04
+	Bug fix
+	* Convert directly supplied m values strictly below ISDATA_LOWER_BOUND (-1e38) to None.
+	Testing
+	* Move tests into ./tests.
+	* Remove doctest runner from user land.
+	* Add round trip property tests for Point and PointM using hypothesis.
+
+VERSION 3.0.9
+
+2026-05-27
+	Testing
+	* Try to make tests not rely on downloads from Github repo URLs, to avoid 404s & 426s due to rate limits.
+
+2026-05-27
+	Testability / separation of concerns:
+	* Separate shx and shp only methods into new ShpWriter, ShxWriter, ShpReader, and ShxReader classes
+	  (instances of each pair is owned by the regular Shapefile Writer and Reader classes respectively).
+
+2026-05-26
+	Remove ambiguity in API (BREAKING CHANGE):
+	* Reader and Writer now both raise TypeError when passed a supported Shapefile target
+	as the positional-only, non-keyword arg, and also kwargs for shp, dbf or shx (instead
+	of silently dropping or overwriting those kwargs, with the user being none the wiser).
+2026-05-26
+	Bug fix (BREAKING CHANGE):
+	* Reader and Writer now raise TypeError instead of continuing silently, as if given no args
+	(e.g. in anticipation of a subsequent call to Reader.load), when passed an unsupported
+	truthy Python object (not a str or a Path) as its first arg (the positional-only, non-keyword arg).
+
+2026-05-23
+	Bug fix (BREAKING CHANGE):
+	* Correct NODATA lower threshold to -1e38 (as per [spec](https://www.esri.com/content/dam/esrisites/sitecore-archive/Files/Pdfs/library/whitepapers/pdfs/shapefile.pdf)
+	page 2, Numeric Types). This is a tenth of PyShp's previous threshold -10e38, but still a huge negative number.
+
+2026-05-20
+	Security:
+	* Add python_version >= 3.10 to pre-commit dev & lint groups' 'dependency' (due to CVE in filelock 3.19).
+
+VERSION 3.0.8
+
+2026-05-20
+	Testability / separation of concerns:
+	* Separate dbf only writing methods into a new dbfWriter class (an instance of which is owned by the regular Shapefile Writer class).
+
+VERSION 3.0.7
+
+2026-05-20
+	Testability / separation of concerns:
+	* Separate dbf only reading methods into a new dbfReader class (an instance of which is owned by the regular Shapefile Reader class).
+
+
+VERSION 3.0.6
+
+2026-05-19
+	URL Downloading:
+	* Unify tempfile creation and shapefile download logic.
+	* Check "Content-Type" header and sniff initial bytes
+	of response in order to possibly reject html responses, before parsing as a shapefile, to give a more useful error to users.
+	* Special case shapefiles hosted in Github repos to suggest appending the query string `?raw=true`.
+
+
+2026-05-18
+	Testing:
+	* Add shapefile from Open Natual Hazard Modelling ([Paula Spannring](https://github.com/PaulaSp3)
+	and [Felix Oesterle, Austrian Research Centre for Forests](https://orcid.org/0000-0002-7772-6884)).
+
+VERSION 3.0.5
+
+2026-05-18
+	Project structure:
+	* Use dependency groups for dev and test instead of optional-dependencies in pyproject.toml (Mike Toews)
+
+VERSION 3.0.4
+
+2026-05-17
+    Type checking:
+	* Fix PyShp-stubs, and add test to it.  Remove all actual stubs from it, and replace with empty "shapefile-stubs/py.typed".
+	  Closes Issue 382 (https://github.com/GeospatialPython/pyshp/issues/382) and discussion 371 (https://github.com/GeospatialPython/pyshp/discussions/371).
+	  Bug originally found by Thomas Beierlein (https://github.com/GeospatialPython/pyshp/issues/367)
+
+VERSION 3.0.3
+
+2025-11-28
+    Type checking:
+	* Add optional dependency, "stubs", containing the package "pyshp-stubs" generated with stubgen (to avoid
+	  including py.typed, and no longer being a single file project).
+
+2025-10-25
+	Bug fix:
+	* Prevented UnboundLocalError when reading non-single point M and Z type Shapefiles (@ekawas-vrify).
+
+2025-10-10
+	Testing:
+	* Test on the Python 3.14 official release (no longer in beta)
+
+VERSION 3.0.2
+
+2025-10-10
+	.post1.  Documentation update.  Update version at the top of README.md. (to make what PyPi users see consistent with the changelog and __version__).
+2025-10-10
+	.post0.  Re-release as 3.0.2.post0 to trigger deploy job to Publish to Pypi
+
+2025-10-09
+    Bug fix:
+	* Deleted py.typed (probably temporarily).  Including the py.typed marker file with a single
+	  file package caused type checkers to type check all other libraries installed in the same
+	  directory (whether they're typed or not, enforcing type checking for all the adjacent dirs
+	  libraries, regardless of the user's intentions for the type checker)
+	  (pointed out by @dl1jbe).  Discussions will be started about a longer term fix, possibly
+	  e.g. possibly refactoring to a package, and restoring py.typed.
+
+2025-08-20
+	Code quality:
+	* Ruff check's UP rule added (mimicks PyUpgrade) (@mwtoews).
+
+
+VERSION 3.0.1
+
+2025-08-19
+	Improvements:
+	* Reader(shp=, dbf=, shx=) now support pathlib.Paths, and any pathlike object (@mwtoews).
+	Bug fixes:
+	* PyShp 3 no longer modifies the global doctest module (@JamesParrott).
+	Code quality:
+	* isort replaced by Ruff check's I rule (@mwtoews).
+	* mypy --strict used in CI (@JamesParrott).
+	* LICENSE.TXT re-encoded in UTF-8 (@musicinmybrain)
+
+
+VERSION 3.0.0
+
+2025-08-03
+	Breaking Changes:
+	* Python 2 and Python 3.8 support dropped.
+	* Field info tuple is now a namedtuple (Field) instead of a list.
+	* Field type codes are now FieldType 'enum' members.
+	* bbox, mbox and zbox attributes are all new Namedtuples.
+	* Writer does not mutate Shapes.
+	* New custom subclasses for each shape type: Null, Multipatch, Point, Polyline,
+	  Multipoint, and Polygon, plus the latter 4's M and Z variants (Reader and
+	  Writer are still compatible with their base class, Shape, as before).
+	* Shape sub classes are creatable from, and serializable to bytes streams,
+	  as per the shapefile spec.
+
+    Code quality
+	* Statically typed and checked with Mypy
+	* Checked with Ruff. (@mwtoews)
+    * Type hints
+	* f-strings
+	* Remove Python 2 specific functions.
+	* Run doctests against wheels.
+	* Testing of wheels before publishing them
+	* Updated metadata, changed build backend to Hatch, and restructured repor into pyproject.toml src layout (@mwtoews)
+	* Slow test marked.
+
+	Improvements:
+	* Speeded up writing shapefiles by up to another ~27% (on top of the recent ~39% improvement in 2.4.1).
+
+
+VERSION 2.4.1
+
+2025-07-30
+	Improvements:
+	* Speed up writing shapefiles by up to ~39%.  Combined for loops of calls to f.write(pack(...)), into single calls.
+
+	Forthcoming Breaking Change.  Support for Python 2 and Pythons <= 3.8 to be dropped.
+	* PyShp 2.4.1 is the latest (and likely last) version of PyShp to support Python 2.7 and Pythons <= 3.8.
+	  These CPython versions have reached [end of life](https://devguide.python.org/versions/#versions).
+	* Future development will focus on PyShp v3.0.0 onwards (currently intended to supporting Pythons >= 3.9).
+	* This will not break any projects, as pip and other package managers should not install PyShp 3.0.0
+	  (after its release) in unsupported Pythons.  But we no longer promise such projects will get PyShp's latest
+	  bug fixes and features.
+	* If this negatively impacts your project, all feedback about this decision is welcome
+	  on our [the discussion page](https://github.com/GeospatialPython/pyshp/discussions/290).
+
+VERSION 2.4.0
+
+2025-07-21
+
+
+	New Features:
+	* Reader.iterRecords now allows start and stop to be specified, to lookup smaller ranges of records.
+	* Equality comparisons between Records now also require the fields to be the same (and in the same order).
+
+	Development:
+	* Code quality tools (Ruff format) run on PyShp
+	* Network, non-network, or all doctests selectable via command line args
+	* Network tests made runnable on localhost.
+
+VERSION 2.3.1
+
+2022-07-28
+	Bug fixes:
+	* Fix recently introduced issue where Reader/Writer closes file-like objects provided by user (#244)
+
+VERSION 2.3.0
+
+2022-04-30
+	New Features:
+	* Added support for pathlib and path-like shapefile filepaths (@mwtoews).
+	* Allow reading individual file extensions via filepaths.
+
+	Improvements:
+	* Simplified setup and deployment (@mwtoews)
+	* Faster shape access when missing shx file
+	* Switch to named logger (see #240)
+
+	Bug fixes:
+	* More robust handling of corrupt shapefiles (fixes #235)
+	* Fix errors when writing to individual file-handles (fixes #237)
+	* Revert previous decision to enforce geojson output ring orientation (detailed explanation at https://github.com/SciTools/cartopy/issues/2012)
+	* Fix test issues in environments without network access (@sebastic, @musicinmybrain).
+
+VERSION 2.2.0
+
+2022-02-02
+	New Features:
+	* Read shapefiles directly from zipfiles.
+	* Read shapefiles directly from urls.
+	* Allow fast extraction of only a subset of dbf fields through a `fields` arg.
+	* Allow fast filtering which shapes to read from the file through a `bbox` arg.
+
+	Improvements:
+	* More examples and restructuring of README.
+	* More informative Shape to geojson warnings (see #219).
+	* Add shapefile.VERBOSE flag to control warnings verbosity (default True).
+	* Shape object information when calling repr().
+	* Faster ring orientation checks, enforce geojson output ring orientation.
+
+	Bug fixes:
+	* Remove null-padding at end of some record character fields.
+	* Fix dbf writing error when the number of record list or dict entries didn't match the number of fields.
+	* Handle rare garbage collection issue after deepcopy (https://github.com/mattijn/topojson/issues/120)
+	* Fix bug where records and shapes would be assigned incorrect record number (@karanrn)
+	* Fix typos in docs (@timgates)
+
+VERSION 2.1.3
+
+2021-01-14
+	Bug fixes:
+	* Fix recent bug in geojson hole-in-polygon checking (see #205)
+	* Misc fixes to allow geo interface dump to json (eg dates as strings)
+	* Handle additional dbf date null values, and return faulty dates as unicode (see #187)
+	* Add writer target typecheck
+	* Fix bugs to allow reading shp/shx/dbf separately
+	* Allow delayed shapefile loading by passing no args
+	* Fix error with writing empty z/m shapefile (@mcuprjak)
+	* Fix signed_area() so ignores z/m coords
+	* Enforce writing the 11th field name character as null-terminator (only first 10 are used)
+	* Minor README fixes
+	* Added more tests
+
+VERSION 2.1.2
+
+2020-09-10
+	Bug fixes:
+	* Fix issue where `warnings.simplefilter('always')` changes global warning behavior [see #203]
+
+VERSION 2.1.1
+
+2020-09-09
+	Improvements:
+	* Handle shapes with no coords and represent as geojson with no coords (GeoJSON null-equivalent)
+	* Expand testing to Python 3.6, 3.7, 3.8 and PyPy; drop 3.3 and 3.4 [@mwtoews]
+	* Added pytest testing [@jmoujaes]
+
+	Bug fixes:
+	* Fix incorrect geo interface handling of multipolygons with complex exterior-hole relations [see #202]
+	* Enforce shapefile requirement of at least one field, to avoid writing invalid shapefiles [@Jonty]
+	* Fix Reader geo interface including DeletionFlag field in feature properties [@nnseva]
+	* Fix polygons not being auto closed, which was accidentally dropped
+	* Fix error for null geometries in feature geojson
+	* Misc docstring cleanup [@fiveham]
+
+VERSION 2.1.0
+
+2019-02-15
+	New Features:
+	* Added back read/write support for unicode field names.
+	* Improved Record representation
+	* More support for geojson on Reader, ShapeRecord, ShapeRecords, and shapes()
+
+	Bug fixes:
+	* Fixed error when reading optional m-values
+	* Fixed Record attribute autocomplete in Python 3
+	* Misc readme cleanup
+
+VERSION 2.0.1
+
+2018-11-05
+	* Fix pip install setup.py README decoding error.
+
+VERSION 2.0.0
+
+2018-09-01
+	(Note: Some contributor attributions may be missing.)
+	New Features:
+	* Full support for unicode text, with custom encoding, and exception handling.
+	  - Means that the Reader returns unicode, and the Writer accepts unicode.
+	* PyShp has been simplified to a pure input-output library using the Reader and Writer classes, dropping the Editor class.
+	* Switched to a new streaming approach when writing files, keeping memory-usage at a minimum:
+	  - Specify filepath/destination and text encoding when creating the Writer.
+	  - The file is written incrementally with each call to shape/record.
+	  - Adding shapes is now done using dedicated methods for each shapetype.
+	* Reading shapefiles is now more convenient:
+	  - Shapefiles can be opened using the context manager, and files are properly closed.
+	  - Shapefiles can be iterated, have a length, and supports the geo interface.
+	  - New ways of inspecing shapefile metadata by printing. [@megies]
+	  - More convenient accessing of Record values as attributes. [@philippkraft]
+	  - More convenient shape type name checking. [@megies]
+	* Add more support and documentation for MultiPatch 3D shapes.
+	* The Reader "elevation" and "measure" attributes now renamed "zbox" and "mbox", to make it clear they refer to the min/max values.
+	* Better documentation of previously unclear aspects, such as field types.
+
+	Bug Fixes:
+	* More reliable/robust:
+	  - Fixed shapefile bbox error for empty or point type shapefiles. [@mcuprjak]
+	  - Reading and writing Z and M type shapes is now more robust, fixing many errors, and has been added to the documentation. [@ShinNoNoir]
+	  - Improved parsing of field value types, fixed errors and made more flexible.
+	  - Fixed bug when writing shapefiles with datefield and date values earlier than 1900 [@megies]
+	* Fix some geo interface errors, including checking polygon directions.
+	* Bug fixes for reading from case sensitive file names, individual files separately, and from file-like objects. [@gastoneb, @kb003308, @erickskb]
+	* Enforce maximum field limit. [@mwtoews]
+
+VERSION 1.2.12
+	* ?
+
+VERSION 1.2.11
+
+2017-04-29 Karim Bahgat <karim.bahgat.norway@gmail.com>
+	* Fixed bugs when reading and writing empty shapefiles.
+	* Fixed bug when writing null geometry.
+	* Fixed misc data type errors.
+	* Fixed error when reading files with wrong record length.
+	* Use max field precision when saving decimal numbers.
+	* Improved shapetype detection.
+	* Expanded docs on data types.
+	* General doc additions and travis icon.
+
+VERSION 1.2.10
+
+2016-09-24 Karim Bahgat <karim.bahgat.norway@gmail.com>
+	* Bump version to fix pip install issue.
+
+VERSION 1.2.9
+
+2016-09-22 Karim Bahgat <karim.bahgat.norway@gmail.com>
+	* Revert back to fix #66.
+
+VERSION 1.2.8
+
+2016-08-17 Joel Lawhead <jlawhead@geospatialpython.com>
+	* Configured Travis-CI
+
+VERSION 1.2.5
+
+2016-08-16 Joel Lawhead <jlawhead@geospatialpython.com>
+	* Reader speed up through batch unpacking bytes
+	* Merge README text into markdown file. Remove text version.
+	* Fixed parsing of number of points for some shapes (MULTIPOINTM, MULTIPOINTZ)
+
+VERSION 1.2.3
+
+2015-06-21 Joel Lawhead <jlawhead@geospatialpython.com>
+	*shapefile.py (u) Bugfix for Python3 with Reader.iterShapeRecords()
+
+VERSION 1.2.2
+
+### upcoming (2015/01/09 05:27 +00:00)
+- [#11](https://github.com/geospatialpython/pyshp/pull/11) Merge pull request #11 from 7mp/master (@7mp)
+- [#1](https://github.com/geospatialpython/pyshp/pull/1) Merge pull request #1 from rgbkrk/patch-1 (@rgbkrk)
+- [#13](https://github.com/geospatialpython/pyshp/pull/13) Merge pull request #13 from jzmiller1/patch-1 (@jzmiller1)
+- [#16](https://github.com/geospatialpython/pyshp/pull/16) Merge pull request #16 from riggsd/null-friendly (@riggsd)
+- [#17](https://github.com/geospatialpython/pyshp/pull/17) Merge pull request #17 from riggsd/no-asserts (@riggsd)
+- [#19](https://github.com/geospatialpython/pyshp/pull/19) Merge pull request #19 from razzius/master (@razzius)
+- [#20](https://github.com/geospatialpython/pyshp/pull/20) Merge pull request #20 from Brideau/patch-1 (@Brideau)
+- [12d69d4](https://github.com/GeospatialPython/pyshp/commit/12d69d47d8c90b445ea22bf5d9530b0c1c710de5) Updated to version 1.2.1 to match PyPI (@GeospatialPython)
+- [05b69dc](https://github.com/GeospatialPython/pyshp/commit/05b69dc6b3d58c0dc9a822f6c4b8d45cf8dc9d94) Updated to version 1.2.1 to match PyPI (@GeospatialPython)
+- [d2e9f1a](https://github.com/GeospatialPython/pyshp/commit/d2e9f1a41d02cf932484111f45c31781d1f7385a) Typo: recordsIter should be iterRecords (@Brideau)
+- [a965aff](https://github.com/GeospatialPython/pyshp/commit/a965aff230aa3f3b85016f7b627609c7e53a2cf9) Format README code sample (@razzius)
+- [66e1802](https://github.com/GeospatialPython/pyshp/commit/66e1802013fd3535baa505e15625afaa895ef819) Raise ShapefileException for runtime errors rather than using `assert()`
+- [d72723c](https://github.com/GeospatialPython/pyshp/commit/d72723c9e38db8e859b79d95a65c00af1c2ba8ba) Return None when parsing (illegal) NULL attribute values in numeric and date fields, like those produced by QGIS
+- [783e68c](https://github.com/GeospatialPython/pyshp/commit/783e68c75b8f20c7656ea470dbc5e9496a8ee0ac) Update link to "XBase File Format Description" (@jzmiller1)
+- [79cc409](https://github.com/GeospatialPython/pyshp/commit/79cc409362a24caf4a21923419490ee95d557dc3) Added `Reader.iterShapeRecords` to help work with larger files
+- [18c5521](https://github.com/GeospatialPython/pyshp/commit/18c5521b89cd1d7968dff8eb03c1ec37ab4307c5) URL Change (@rgbkrk)
+- [202143c](https://github.com/GeospatialPython/pyshp/commit/202143c823407ffea07b5400e77b9ded7169f696) README.md TOC Take 2
+- [2cca75c](https://github.com/GeospatialPython/pyshp/commit/2cca75cd09b27bb19a77ffeb68afc535e3c33802) README.md TOC
+- [8b5e994](https://github.com/GeospatialPython/pyshp/commit/8b5e994905fd4a70c0f7ce6d814346e6666b280c) README.md
+- [f31a3d7](https://github.com/GeospatialPython/pyshp/commit/f31a3d773dd22e65d3e38ad8b034f186a05b4c4d) Update README.txt (@GeospatialPython)
+
+VERSION 1.2.1
+
+2014-05-11 Joel Lawhead <jlawhead@geospatialpython.com>
+	*shapefile.py (u) fixed bug which failed to properly read some dbf fields in Python 3
+
+VERSION 1.2.0
+
+2013-09-05 Joel Lawhead <jlawhead@geospatialpython.com>
+	*README.txt add example/test for writing a 3D polygon
+
+VERSION 1.1.9
+
+2013-07-27 Joel Lawhead <jlawhead@geospatialpython.com>
+	*shapefile.py (Writer.__shpRecords) fixed inconsistency between Reader and Writer
+	when referencing "z" and "m" values.  This bug caused errors only when editing
+	3D shapefiles.
+
+VERSION 1.1.8
+
+2013-07-02 Joel Lawhead <jlawhead@geospatialpython.com>
+	*shapefile.py (Writer.poly()) fixed a bug that resulted in incorrect part indexes
+	*README.txt updated several errors in the documentation.
+
+2013-06-25 Joel Lawhead <jlawhead@geospatialpython.com>
+	*shapefile.py (Reader.shapes(),Reader.iterShapes()) Updated to verify the file length by
+	seeking to the end. A user reported shapefiles in the wild which had incorrect .shp file
+	lengths reported in the header which crashed when reading or iterating shapes.  Most
+	insist on using the .shx file but there's no real reason to do so.
+
+VERSION 1.1.7
+
+2013-06-22 Joel Lawhead <jlawhead@geospatialpython.com>
+
+	*shapefile.py (_Shape.__geo_interface__) Added Python __geo_interface__ convention
+	to export shapefiles as GeoJSON.
+
+	*shapefile.py (Reader.__init__) Used is_string() method to detect filenames passed
+	as unicode strings.
+
+	*shapefile.py (Reader.iterShapes) Added iterShapes() method to iterate through
+	geometry records for parsing large files efficiently.
+
+	*shapefile.py (Reader.iterRecords) Added iterRecords() method to iterate through
+	dbf records efficiently in large files.
+
+	*shapefile.py (Reader.shape) Modified shape() method to use iterShapes() if shx
+	file is not available.
+
+	*shapefile.py (main) Added __version__ attribute.
+
+	*shapefile.py (Writer.record) Fixed bug which prevents writing the number 0 to
+	dbf fields.
+
+	*shapefile.py (Reader.__shape) Updated to calculate and seek the start of the next record. The
+	shapefile spec does not require the content of a geometry record to be as long as the content
+	length defined in the header.  The result is you can delete features without modifying the
+	record header allowing for empty space in records.
+
+	*shapefile.py (Writer.poly) Added enforcement of closed polygons
+
+	*shapefile.py (Writer.save) Added unique file name generator to use if no file names are passed
+	to a writer instance when saving (ex. w.save()).  The unique file name is returned as a string.
+
+	*README.txt (main) Added tests for iterShapes(), iterRecords(), __geo_interface__()
+
+	*README.txt (main) Updated "bbox" property documentation to match Esri specification.
