@@ -1136,6 +1136,276 @@ def organize_polygon_rings(
     return polys
 
 
+class RingPreview(NamedTuple):
+    """Preview of how a single polygon ring (shape part) is classified
+    by geometric containment."""
+
+    part: int  # index of the ring's part in the original shape
+    role: str  # "shell" (exterior ring) or "hole" (interior ring)
+    orientation: str  # "clockwise", "counterclockwise", or "degenerate"
+    signed_area: float  # signed area of the ring (negative if clockwise)
+    depth: int  # number of other rings geometrically containing this ring
+    parent: int | None  # part index of the immediately containing ring, or None
+
+
+class PolygonGroupPreview(NamedTuple):
+    """Preview of a single polygon: one exterior shell and its direct holes."""
+
+    shell: RingPreview
+    holes: list[RingPreview]
+
+
+class AmbiguousRingPreview(NamedTuple):
+    """A ring that could not be unambiguously assigned to a polygon group."""
+
+    part: int  # index of the ring's part in the original shape
+    orientation: str  # "clockwise", "counterclockwise", or "degenerate"
+    reason: str  # why the ring could not be assigned
+
+
+class PolygonGroupingPreview(NamedTuple):
+    """Preview of how the rings (parts) of a polygon shape group into
+    individual polygons, based on geometric containment."""
+
+    groups: list[PolygonGroupPreview]
+    ambiguous: list[AmbiguousRingPreview]
+
+    def to_polygons(self, parts: Sequence[PointsT]) -> list[list[PointsT]]:
+        """Rebuild the confirmed polygons from the original parts.
+        Returns a list of polygons, where each polygon is a list of rings
+        with the exterior shell first, followed by its holes. Rings in the
+        ambiguity list are excluded."""
+        return [
+            [list(parts[group.shell.part])]
+            + [list(parts[hole.part]) for hole in group.holes]
+            for group in self.groups
+        ]
+
+
+def _segments_intersect_or_touch(
+    p1: Point2D, p2: Point2D, p3: Point2D, p4: Point2D
+) -> bool:
+    """Tests whether the 2D segments p1-p2 and p3-p4 cross or touch,
+    including endpoint contact and collinear overlap. Only the x and y
+    values of each point are used.
+    """
+
+    def _orient(a: Point2D, b: Point2D, c: Point2D) -> float:
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+    def _on_segment(p: Point2D, a: Point2D, b: Point2D) -> bool:
+        # p is known to be collinear with a-b
+        return min(a[0], b[0]) <= p[0] <= max(a[0], b[0]) and min(a[1], b[1]) <= p[
+            1
+        ] <= max(a[1], b[1])
+
+    d1 = _orient(p3, p4, p1)
+    d2 = _orient(p3, p4, p2)
+    d3 = _orient(p1, p2, p3)
+    d4 = _orient(p1, p2, p4)
+
+    # proper crossing (each segment straddles the line of the other)
+    if ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0)):
+        return True
+
+    # touching: an endpoint of one segment lies on the other segment
+    return (
+        (d1 == 0 and _on_segment(p1, p3, p4))
+        or (d2 == 0 and _on_segment(p2, p3, p4))
+        or (d3 == 0 and _on_segment(p3, p1, p2))
+        or (d4 == 0 and _on_segment(p4, p1, p2))
+    )
+
+
+def _ring_pair_relation(
+    ring1: PointsT,
+    ring2: PointsT,
+    bbox1: BBox,
+    bbox2: BBox,
+    edges1: list[tuple[PointT, PointT, BBox]],
+    edges2: list[tuple[PointT, PointT, BBox]],
+) -> str:
+    """Classify the geometric relationship between two rings as "disjoint",
+    "contains" (ring1 strictly contains ring2), "contained" (ring1 is strictly
+    contained by ring2), or "intersects" (the boundaries cross or touch, so
+    containment cannot be uniquely determined).
+    """
+    # cheap bbox reject (bbox containment alone is never sufficient,
+    # but disjoint bboxes do prove disjoint rings)
+    if not bbox_overlap(bbox1, bbox2):
+        return "disjoint"
+
+    # detailed boundary test: edges that cross or touch (including tangent
+    # rings and shared vertices) mean the rings cannot be cleanly nested
+    for a1, a2, a_bbox in edges1:
+        for b1, b2, b_bbox in edges2:
+            if bbox_overlap(a_bbox, b_bbox) and _segments_intersect_or_touch(
+                a1[:2], a2[:2], b1[:2], b2[:2]
+            ):
+                return "intersects"
+
+    # no boundary contact, so a single vertex test decides containment
+    if ring_contains_point(ring1, ring2[0][:2]):
+        return "contains"
+    if ring_contains_point(ring2, ring1[0][:2]):
+        return "contained"
+    return "disjoint"
+
+
+def preview_polygon_groups(parts: Iterable[PointsT]) -> PolygonGroupingPreview:
+    """Preview how the rings (parts) of a polygon shape group into polygons,
+    based purely on geometric containment rather than ring orientation.
+
+    Unlike `organize_polygon_rings`, which classifies rings by their winding
+    direction, this function nests rings by testing whether each ring
+    geometrically contains the others. This correctly handles supplier data
+    with islands-in-lakes and lakes-in-islands (rings nested more than one
+    level deep), as well as rings whose coordinates were written in the
+    wrong direction. Each ring is reported with its original part index and
+    its actual orientation, so wrongly-oriented rings can be identified.
+
+    Rings whose boundaries touch or cross (tangent or intersecting rings),
+    and degenerate rings, cannot be uniquely assigned and are reported in
+    the ambiguity list; all remaining rings are still grouped and can be
+    exported with `PolygonGroupingPreview.to_polygons`.
+
+    The grouping is determined purely by geometry, so shuffling the input
+    parts does not change the resulting topology: rebuilding from the same
+    set of rings in any order yields the same shells, holes, and parent
+    relationships (only the part indexes differ).
+
+    Rings may be open or closed; open rings are closed automatically.
+    """
+    rings = _with_polygon_rings_closed([list(part) for part in parts])
+    count = len(rings)
+
+    # classify orientation of each ring, keeping the original part order
+    orientations: list[str] = []
+    areas: list[float] = []
+    for ring in rings:
+        distinct = {tuple(point[:2]) for point in ring}
+        if len(distinct) < 3:
+            orientations.append("degenerate")
+            areas.append(0.0)
+            continue
+        area = signed_area(ring)
+        areas.append(area)
+        if area < 0:
+            orientations.append("clockwise")
+        elif area > 0:
+            orientations.append("counterclockwise")
+        else:
+            orientations.append("degenerate")
+
+    # precompute bboxes and edges (with per-edge bboxes) for valid rings
+    bboxes: list[BBox | None] = []
+    edges_per_ring: list[list[tuple[PointT, PointT, BBox]]] = []
+    for i, ring in enumerate(rings):
+        if orientations[i] == "degenerate":
+            bboxes.append(None)
+            edges_per_ring.append([])
+            continue
+        bboxes.append(ring_bbox(ring))
+        ring_edges = []
+        for p1, p2 in zip(ring, ring[1:]):
+            edge_bbox = BBox(
+                min(p1[0], p2[0]),
+                min(p1[1], p2[1]),
+                max(p1[0], p2[0]),
+                max(p1[1], p2[1]),
+            )
+            ring_edges.append((p1, p2, edge_bbox))
+        edges_per_ring.append(ring_edges)
+
+    # test every pair of valid rings for containment or boundary contact
+    containers: list[set[int]] = [set() for _ in range(count)]
+    conflicts: list[set[int]] = [set() for _ in range(count)]
+    ambiguous_reasons: dict[int, str] = {}
+    for i in range(count):
+        if orientations[i] == "degenerate":
+            ambiguous_reasons[i] = (
+                "ring is degenerate (fewer than 3 distinct points or zero area)"
+            )
+            continue
+        for j in range(i + 1, count):
+            if orientations[j] == "degenerate":
+                continue
+            relation = _ring_pair_relation(
+                rings[i],
+                rings[j],
+                cast(BBox, bboxes[i]),
+                cast(BBox, bboxes[j]),
+                edges_per_ring[i],
+                edges_per_ring[j],
+            )
+            if relation == "intersects":
+                conflicts[i].add(j)
+                conflicts[j].add(i)
+            elif relation == "contains":
+                containers[j].add(i)
+            elif relation == "contained":
+                containers[i].add(j)
+
+    for i in range(count):
+        if conflicts[i]:
+            others = ", ".join(str(part) for part in sorted(conflicts[i]))
+            ambiguous_reasons[i] = f"ring boundary touches or crosses part(s) {others}"
+
+    # nesting depth and immediate parent (the smallest containing ring)
+    depths = [len(containers[i]) for i in range(count)]
+    parents: list[int | None] = [None] * count
+    for i in range(count):
+        if containers[i]:
+            parents[i] = min(containers[i], key=lambda j: (abs(areas[j]), j))
+
+    # rings inside an ambiguous ring cannot be placed either, since the
+    # status of their container is unknown (parents always have a lower
+    # depth, so processing by increasing depth propagates transitively)
+    for i in sorted(range(count), key=lambda k: depths[k]):
+        if i in ambiguous_reasons:
+            continue
+        parent = parents[i]
+        if parent is not None and parent in ambiguous_reasons:
+            ambiguous_reasons[i] = f"ring is contained by ambiguous part {parent}"
+
+    # build the per-ring previews; shells sit at even depths, holes at odd
+    previews: list[RingPreview | None] = [None] * count
+    ambiguous: list[AmbiguousRingPreview] = []
+    for i in range(count):
+        if i in ambiguous_reasons:
+            ambiguous.append(
+                AmbiguousRingPreview(
+                    part=i,
+                    orientation=orientations[i],
+                    reason=ambiguous_reasons[i],
+                )
+            )
+        else:
+            previews[i] = RingPreview(
+                part=i,
+                role="shell" if depths[i] % 2 == 0 else "hole",
+                orientation=orientations[i],
+                signed_area=areas[i],
+                depth=depths[i],
+                parent=parents[i],
+            )
+
+    # group each confirmed shell with its direct holes
+    holes_by_parent: dict[int, list[RingPreview]] = {}
+    for i, preview in enumerate(previews):
+        parent = parents[i]
+        if preview is not None and preview.role == "hole" and parent is not None:
+            holes_by_parent.setdefault(parent, []).append(preview)
+
+    groups = []
+    for i, preview in enumerate(previews):
+        if preview is not None and preview.role == "shell":
+            holes = sorted(holes_by_parent.get(i, []), key=lambda hole: hole.part)
+            groups.append(PolygonGroupPreview(shell=preview, holes=holes))
+
+    return PolygonGroupingPreview(groups=groups, ambiguous=ambiguous)
+
+
 # Could be an Enum, but an isinstance check is still needed.
 class _NoShapeTypeSentinel:
     """An instance is the default value for Shape.__init__,

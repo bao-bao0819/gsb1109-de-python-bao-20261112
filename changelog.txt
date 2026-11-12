@@ -1,3 +1,7 @@
+VERSION 3.1.9
+2026-11-13
+	* Added preview_polygon_groups(), a containment-based preview of how polygon rings (parts) group into shells and holes. It preserves the original part indexes and orientations, handles nested islands and wrongly-oriented rings, reports tangent or crossing rings in an ambiguity list, and is invariant to part ordering.
+
 VERSION 3.1.8
 2026-11-07
 	* Avoid unnecessary seeks in Reader.iterShapeRecords with a bbox.  Removed lots of deletion field checks (prefer dbfReader.data_fields). Replace two while loops with simpler alternatives.

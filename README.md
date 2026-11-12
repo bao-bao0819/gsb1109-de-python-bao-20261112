@@ -393,6 +393,29 @@ module constant VERBOSE to False:
 
 	>>> shapefile.VERBOSE = False
 
+If you need to inspect how the rings (parts) of a polygon shape would be grouped
+into polygons before converting, `preview_polygon_groups` classifies each ring as
+an exterior shell or an interior hole based purely on geometric containment, not
+ring orientation. This correctly handles islands-in-lakes and lakes-in-islands,
+as well as rings written in the wrong direction, and keeps the original part
+indexes and orientations. Rings whose boundaries touch or cross cannot be
+uniquely assigned and are reported in an ambiguity list, while the remaining
+confirmed polygons can still be exported. The grouping depends only on the
+geometry, so shuffling the input parts does not change the resulting topology:
+
+
+	>>> shell = [(0, 0), (0, 10), (10, 10), (10, 0), (0, 0)]  # clockwise
+	>>> lake = [(2, 2), (4, 2), (4, 4), (2, 4), (2, 2)]  # counter-clockwise
+	>>> preview = shapefile.preview_polygon_groups([shell, lake])
+	>>> preview.groups[0].shell
+	RingPreview(part=0, role='shell', orientation='clockwise', signed_area=-100.0, depth=0, parent=None)
+	>>> [hole.part for hole in preview.groups[0].holes]
+	[1]
+	>>> preview.ambiguous
+	[]
+	>>> preview.to_polygons([shell, lake])
+	[[[(0, 0), (0, 10), (10, 10), (10, 0), (0, 0)], [(2, 2), (4, 2), (4, 4), (2, 4), (2, 2)]]]
+
 
 ### Reading Records
 

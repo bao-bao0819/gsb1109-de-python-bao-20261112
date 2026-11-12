@@ -8,6 +8,7 @@ import io
 import json
 import os.path
 from pathlib import Path
+import random
 import shutil
 import struct
 
@@ -459,6 +460,222 @@ def test_expected_shape_geo_interface(typ, points, parts, expected):
     shape = shapefile.Shape(typ, points, parts)
     geoj = shape.__geo_interface__
     assert geoj == expected
+
+
+def _square_ring(xmin, ymin, xmax, ymax, ccw=False):
+    """Return a closed square ring, clockwise by default."""
+    ring = [
+        (xmin, ymin),
+        (xmax, ymin),
+        (xmax, ymax),
+        (xmin, ymax),
+        (xmin, ymin),
+    ]
+    if not ccw:
+        ring = list(reversed(ring))
+    return ring
+
+
+def test_preview_polygon_groups_nested_islands():
+    """
+    Assert that preview_polygon_groups groups rings nested multiple
+    levels deep (island-in-lake-in-island) by geometric containment.
+    """
+    shell = _square_ring(0, 0, 10, 10)  # outermost shell
+    lake = _square_ring(2, 2, 8, 8, ccw=True)  # hole in shell
+    island = _square_ring(3, 3, 7, 7)  # shell inside the lake
+    pond = _square_ring(4, 4, 6, 6, ccw=True)  # hole in the island
+
+    preview = shapefile.preview_polygon_groups([shell, lake, island, pond])
+
+    assert preview.ambiguous == []
+    assert len(preview.groups) == 2
+
+    first, second = preview.groups
+    assert first.shell.part == 0
+    assert first.shell.role == "shell"
+    assert first.shell.depth == 0
+    assert first.shell.parent is None
+    assert [hole.part for hole in first.holes] == [1]
+    assert first.holes[0].role == "hole"
+    assert first.holes[0].depth == 1
+    assert first.holes[0].parent == 0
+
+    assert second.shell.part == 2
+    assert second.shell.role == "shell"
+    assert second.shell.depth == 2
+    assert second.shell.parent == 1
+    assert [hole.part for hole in second.holes] == [3]
+    assert second.holes[0].depth == 3
+    assert second.holes[0].parent == 2
+
+
+def test_preview_polygon_groups_reversed_orientation():
+    """
+    Assert that rings written in the wrong direction are still grouped
+    correctly by containment, with their actual orientation reported.
+    """
+    shell = _square_ring(0, 0, 10, 10, ccw=True)  # shell written ccw
+    hole = _square_ring(2, 2, 4, 4)  # hole written cw
+
+    preview = shapefile.preview_polygon_groups([shell, hole])
+
+    assert preview.ambiguous == []
+    assert len(preview.groups) == 1
+    group = preview.groups[0]
+    assert group.shell.part == 0
+    assert group.shell.orientation == "counterclockwise"
+    assert group.shell.signed_area > 0
+    assert [hole.part for hole in group.holes] == [1]
+    assert group.holes[0].orientation == "clockwise"
+    assert group.holes[0].signed_area < 0
+
+
+def test_preview_polygon_groups_tangent_rings_are_ambiguous():
+    """
+    Assert that tangent rings (sharing a boundary segment) are reported
+    as ambiguous, while unrelated confirmed polygons are still exported.
+    """
+    shell = _square_ring(0, 0, 10, 10)
+    hole = _square_ring(2, 2, 4, 4, ccw=True)
+    tangent_a = _square_ring(20, 20, 30, 30)
+    tangent_b = _square_ring(30, 20, 40, 30)  # shares edge x=30 with tangent_a
+
+    preview = shapefile.preview_polygon_groups([shell, hole, tangent_a, tangent_b])
+
+    assert [ring.part for ring in preview.ambiguous] == [2, 3]
+    assert all("touches or crosses" in ring.reason for ring in preview.ambiguous)
+    assert len(preview.groups) == 1
+    assert preview.groups[0].shell.part == 0
+    assert [hole.part for hole in preview.groups[0].holes] == [1]
+
+
+def test_preview_polygon_groups_crossing_rings_are_ambiguous():
+    """
+    Assert that rings whose boundaries cross cannot be assigned and
+    are reported as ambiguous.
+    """
+    first = _square_ring(0, 0, 10, 10)
+    second = _square_ring(5, -5, 15, 5)  # crosses the boundary of first
+
+    preview = shapefile.preview_polygon_groups([first, second])
+
+    assert preview.groups == []
+    assert {ring.part for ring in preview.ambiguous} == {0, 1}
+
+
+def test_preview_polygon_groups_ambiguity_propagates_to_contents():
+    """
+    Assert that rings contained by an ambiguous ring cannot be placed
+    either, and join the ambiguity list.
+    """
+    shell = _square_ring(0, 0, 10, 10)
+    hole = _square_ring(2, 2, 4, 4, ccw=True)
+    tangent = _square_ring(10, 2, 14, 6)  # touches the shell's edge x=10
+
+    preview = shapefile.preview_polygon_groups([shell, hole, tangent])
+
+    assert preview.groups == []
+    assert {ring.part for ring in preview.ambiguous} == {0, 1, 2}
+    reasons = {ring.part: ring.reason for ring in preview.ambiguous}
+    assert "touches or crosses" in reasons[0]
+    assert "touches or crosses" in reasons[2]
+    assert "ambiguous part 0" in reasons[1]
+
+
+def test_preview_polygon_groups_degenerate_ring_is_ambiguous():
+    """
+    Assert that zero-area rings are reported as ambiguous degenerate
+    rings, without blocking the remaining polygons.
+    """
+    shell = _square_ring(0, 0, 10, 10)
+    degenerate = [(20, 20), (25, 25), (20, 20)]  # zero-area line
+
+    preview = shapefile.preview_polygon_groups([shell, degenerate])
+
+    assert len(preview.groups) == 1
+    assert preview.groups[0].shell.part == 0
+    assert len(preview.ambiguous) == 1
+    assert preview.ambiguous[0].part == 1
+    assert preview.ambiguous[0].orientation == "degenerate"
+    assert "degenerate" in preview.ambiguous[0].reason
+
+
+def test_preview_polygon_groups_part_order_invariant():
+    """
+    Assert that shuffling the input parts does not change the grouping
+    topology: the same shells, holes, and parent relationships result.
+    """
+    rings = [
+        _square_ring(0, 0, 10, 10),  # 0: shell
+        _square_ring(2, 2, 8, 8, ccw=True),  # 1: lake
+        _square_ring(3, 3, 7, 7),  # 2: island in lake
+        _square_ring(4, 4, 6, 6, ccw=True),  # 3: pond in island
+        _square_ring(20, 20, 30, 30),  # 4: separate shell
+        _square_ring(22, 22, 24, 24, ccw=True),  # 5: its hole
+    ]
+
+    def topology(preview, ring_ids):
+        groups = {
+            (
+                ring_ids[group.shell.part],
+                frozenset(ring_ids[hole.part] for hole in group.holes),
+            )
+            for group in preview.groups
+        }
+        parents = {
+            (ring_ids[ring.part], None if ring.parent is None else ring_ids[ring.parent])
+            for group in preview.groups
+            for ring in [group.shell] + group.holes
+        }
+        roles = {
+            (ring_ids[ring.part], ring.role, ring.depth)
+            for group in preview.groups
+            for ring in [group.shell] + group.holes
+        }
+        return groups, parents, roles
+
+    expected = topology(shapefile.preview_polygon_groups(rings), list(range(len(rings))))
+
+    rng = random.Random(42)
+    for _ in range(10):
+        order = list(range(len(rings)))
+        rng.shuffle(order)
+        shuffled = [rings[i] for i in order]
+        preview = shapefile.preview_polygon_groups(shuffled)
+        assert preview.ambiguous == []
+        assert topology(preview, order) == expected
+
+
+def test_preview_polygon_groups_to_polygons():
+    """
+    Assert that the confirmed groups can be exported back as polygons
+    of original rings, excluding ambiguous rings.
+    """
+    shell = _square_ring(0, 0, 10, 10)
+    hole = _square_ring(2, 2, 4, 4, ccw=True)
+    other = _square_ring(20, 20, 30, 30)
+    tangent = _square_ring(30, 20, 40, 30)  # ambiguous with other
+    parts = [shell, hole, other, tangent]
+
+    preview = shapefile.preview_polygon_groups(parts)
+    polys = preview.to_polygons(parts)
+
+    assert polys == [[shell, hole]]
+
+
+def test_preview_polygon_groups_unclosed_rings():
+    """
+    Assert that unclosed rings are closed automatically before grouping.
+    """
+    shell = _square_ring(0, 0, 10, 10)[:-1]
+    hole = _square_ring(2, 2, 4, 4, ccw=True)[:-1]
+
+    preview = shapefile.preview_polygon_groups([shell, hole])
+
+    assert preview.ambiguous == []
+    assert len(preview.groups) == 1
+    assert [hole.part for hole in preview.groups[0].holes] == [1]
 
 
 def test_reader_geo_interface():
