@@ -1,0 +1,226 @@
+[
+  {
+    "offset": 0,
+    "opcode": "0x0809",
+    "name": "BOF(globals)",
+    "rowx": null,
+    "colx": null,
+    "length": 20
+  },
+  {
+    "offset": 20,
+    "opcode": "0x0042",
+    "name": "CODEPAGE",
+    "rowx": null,
+    "colx": null,
+    "length": 6
+  },
+  {
+    "offset": 26,
+    "opcode": "0x0085",
+    "name": "BOUNDSHEET",
+    "rowx": null,
+    "colx": null,
+    "length": 20
+  },
+  {
+    "offset": 46,
+    "opcode": "0x00FC",
+    "name": "SST",
+    "rowx": null,
+    "colx": null,
+    "length": 175
+  },
+  {
+    "offset": 221,
+    "opcode": "0x00E0",
+    "name": "XF[0] style",
+    "rowx": null,
+    "colx": null,
+    "length": 24
+  },
+  {
+    "offset": 245,
+    "opcode": "0x00E0",
+    "name": "XF[1] cell",
+    "rowx": null,
+    "colx": null,
+    "length": 24
+  },
+  {
+    "offset": 269,
+    "opcode": "0x000A",
+    "name": "EOF(globals)",
+    "rowx": null,
+    "colx": null,
+    "length": 4
+  },
+  {
+    "offset": 273,
+    "opcode": "0x0809",
+    "name": "BOF(worksheet)",
+    "rowx": null,
+    "colx": null,
+    "length": 20
+  },
+  {
+    "offset": 293,
+    "opcode": "0x0200",
+    "name": "DIMENSIONS",
+    "rowx": null,
+    "colx": null,
+    "length": 18
+  },
+  {
+    "offset": 311,
+    "opcode": "0x00FD",
+    "name": "LABELSST",
+    "rowx": 0,
+    "colx": 0,
+    "length": 14
+  },
+  {
+    "offset": 325,
+    "opcode": "0x00FD",
+    "name": "LABELSST",
+    "rowx": 0,
+    "colx": 1,
+    "length": 14
+  },
+  {
+    "offset": 339,
+    "opcode": "0x00FD",
+    "name": "LABELSST",
+    "rowx": 0,
+    "colx": 2,
+    "length": 14
+  },
+  {
+    "offset": 353,
+    "opcode": "0x00FD",
+    "name": "LABELSST",
+    "rowx": 1,
+    "colx": 0,
+    "length": 14
+  },
+  {
+    "offset": 367,
+    "opcode": "0x0203",
+    "name": "NUMBER(0.0)",
+    "rowx": 1,
+    "colx": 1,
+    "length": 18
+  },
+  {
+    "offset": 385,
+    "opcode": "0x00FD",
+    "name": "LABELSST",
+    "rowx": 1,
+    "colx": 2,
+    "length": 14
+  },
+  {
+    "offset": 399,
+    "opcode": "0x00FD",
+    "name": "LABELSST",
+    "rowx": 2,
+    "colx": 0,
+    "length": 14
+  },
+  {
+    "offset": 413,
+    "opcode": "0x0201",
+    "name": "BLANK",
+    "rowx": 2,
+    "colx": 1,
+    "length": 10
+  },
+  {
+    "offset": 423,
+    "opcode": "0x00FD",
+    "name": "LABELSST",
+    "rowx": 2,
+    "colx": 2,
+    "length": 14
+  },
+  {
+    "offset": 437,
+    "opcode": "0x00FD",
+    "name": "LABELSST",
+    "rowx": 3,
+    "colx": 0,
+    "length": 14
+  },
+  {
+    "offset": 451,
+    "opcode": "0x0006",
+    "name": "FORMULA(str)",
+    "rowx": 3,
+    "colx": 1,
+    "length": 29
+  },
+  {
+    "offset": 480,
+    "opcode": "0x0207",
+    "name": "STRING('')",
+    "rowx": 3,
+    "colx": 1,
+    "length": 7
+  },
+  {
+    "offset": 487,
+    "opcode": "0x00FD",
+    "name": "LABELSST",
+    "rowx": 3,
+    "colx": 2,
+    "length": 14
+  },
+  {
+    "offset": 501,
+    "opcode": "0x00FD",
+    "name": "LABELSST",
+    "rowx": 4,
+    "colx": 0,
+    "length": 14
+  },
+  {
+    "offset": 515,
+    "opcode": "0x00FD",
+    "name": "LABELSST",
+    "rowx": 4,
+    "colx": 2,
+    "length": 14
+  },
+  {
+    "offset": 529,
+    "opcode": "0x00FD",
+    "name": "LABELSST",
+    "rowx": 5,
+    "colx": 0,
+    "length": 14
+  },
+  {
+    "offset": 543,
+    "opcode": "0x00FD",
+    "name": "LABELSST",
+    "rowx": 6,
+    "colx": 0,
+    "length": 14
+  },
+  {
+    "offset": 557,
+    "opcode": "0x0201",
+    "name": "BLANK",
+    "rowx": 6,
+    "colx": 1,
+    "length": 10
+  },
+  {
+    "offset": 567,
+    "opcode": "0x000A",
+    "name": "EOF(worksheet)",
+    "rowx": null,
+    "colx": null,
+    "length": 4
+  }
+]
