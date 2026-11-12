@@ -224,6 +224,10 @@ This software is released under the BSD license.
 from .core import *  # noqa
 from .core import __all__  # noqa For a correct help(uncertainties)
 
+from .recalibration import recalibrate, RecalibrationReport  # noqa
+
+__all__ = __all__ + ["recalibrate", "RecalibrationReport"]
+
 from .version import __version__, __version_tuple__  # noqa
 
 # for backward compatibility
