@@ -48,6 +48,7 @@ issues = "https://github.com/py-vobject/vobject/issues"
 [project.scripts]
 ics_diff = "vobject.ics_diff:main"
 change_tz = "vobject.change_tz:main"
+n_migrate = "vobject.name_migration:main"
 
 [project.optional-dependencies]
 dev = [
