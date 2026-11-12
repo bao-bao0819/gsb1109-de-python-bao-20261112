@@ -311,3 +311,31 @@ vCards objects.
 >>> vobject.readComponents(vCardStream).next().email.value
 'jeffrey@osafoundation.org'
 ```
+
+#### Directory quality reporting
+
+`readComponents` stops at the first unparseable line. To audit a stream that may contain corrupt or truncated
+vCards, use `vobject.scan_vcard_quality`, which isolates damage at the record level:
+
+* a `damaged` card has a recognizable envelope; its parseable lines still count, and a recognizable `UID` keeps
+  its identity;
+* an `unreadable` record has no recognizable envelope, so only its count is known.
+
+Because the uncertain records could be junk, duplicates of known contacts, or new contacts, the report gives the
+number of determinate contacts and reachable lower/upper bounds for the contact count and each field's coverage.
+
+```
+>>> report = vobject.scan_vcard_quality(vCardStream)
+>>> report.determinate_contacts
+2
+>>> report.contact_lower_bound, report.contact_upper_bound
+(2, 4)
+>>> report.field_coverage["EMAIL"]
+{'lower_count': 1, 'upper_count': 3, 'lower_ratio': 0.25, 'upper_ratio': 0.75}
+>>> print(report.format_text())
+vCard directory quality report
+  records scanned     : 5 (ok: 2, damaged: 2, unreadable: 1)
+  determinate contacts: 2
+  contact count bounds: 2 .. 4
+  ...
+```

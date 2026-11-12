@@ -76,8 +76,9 @@ VObject Overview
 
 """
 
-from . import icalendar, vcard
+from . import icalendar, quality, vcard
 from .base import newFromBehavior, readComponents, readOne
+from .quality import QualityReport, scan_vcard_quality
 
 # Package version
 VERSION = "1.0.0"
