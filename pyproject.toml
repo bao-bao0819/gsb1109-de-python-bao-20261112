@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "portion"
+version = "2.6.3"
+license = "LGPL-3.0-or-later"
+license-files = ["LICENSE.txt"]
+authors = [{ name = "Alexandre Decan", email = "alexandre.decan@lexpage.net" }]
+description = "Python data structure and operations for intervals"
+readme = { file = "README.md", content-type = "text/markdown" }
+keywords = ["interval", "interval-set", "range", "span"]
+requires-python = ">= 3.10"
+dependencies = ["sortedcontainers~=2.4"]
+classifiers = [
+    "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+
+[project.urls]
+homepage = "https://github.com/AlexandreDecan/portion"
+repository = "https://github.com/AlexandreDecan/portion"
+changelog = "https://github.com/AlexandreDecan/portion/blob/master/CHANGELOG.md"
+documentation = "https://github.com/AlexandreDecan/portion/blob/master/README.md"
+issues = "https://github.com/AlexandreDecan/portion/issues"
+funding = "https://github.com/sponsors/AlexandreDecan"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-benchmark>=5.2.3",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.14.7",
+]
+
+[tool.ruff]
+include = ["portion/*.py"]
+
+[tool.ruff.lint]
+ignore = ["B028"] # warnings.warn without stacklevel=2
+
+[tool.pytest.ini_options]
+addopts = "--benchmark-skip"
