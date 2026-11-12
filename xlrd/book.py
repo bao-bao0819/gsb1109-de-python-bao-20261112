@@ -9,6 +9,7 @@ import struct
 from . import compdoc, formatting, sheet
 from .biffh import *
 from .formula import *
+from .names import resolve_named, resolve_visible_names
 from .timemachine import *
 
 try:
@@ -487,6 +488,47 @@ class Book(BaseObject):
           loaded.
         """
         return self._sheet_names[:]
+
+    def defined_names_for_sheet(self, sheet_name_or_index, base_rowx=None,
+                                base_colx=None, include_hidden=True,
+                                include_builtin=True):
+        """
+        Resolve the defined names usable from one worksheet.
+
+        This is the :class:`Book`-level counterpart of
+        :meth:`~xlrd.sheet.Sheet.defined_names`; see that method for the
+        meaning of the parameters and the returned
+        :class:`~xlrd.names.NameResolution` objects.
+        """
+        if isinstance(sheet_name_or_index, int):
+            sheetx = sheet_name_or_index
+        else:
+            try:
+                sheetx = self._sheet_names.index(sheet_name_or_index)
+            except ValueError:
+                raise XLRDError('No sheet named <%r>' % sheet_name_or_index)
+        return resolve_visible_names(
+            self, sheetx, base_row=base_rowx, base_col=base_colx,
+            include_hidden=include_hidden, include_builtin=include_builtin,
+        )
+
+    def defined_name_for_sheet(self, sheet_name_or_index, name,
+                               base_rowx=None, base_colx=None):
+        """
+        Resolve one defined name as seen from one worksheet.
+
+        :raises xlrd.biffh.XLRDError: the sheet or the name is not found.
+        """
+        if isinstance(sheet_name_or_index, int):
+            sheetx = sheet_name_or_index
+        else:
+            try:
+                sheetx = self._sheet_names.index(sheet_name_or_index)
+            except ValueError:
+                raise XLRDError('No sheet named <%r>' % sheet_name_or_index)
+        return resolve_named(
+            self, sheetx, name, base_row=base_rowx, base_col=base_colx,
+        )
 
     def sheet_loaded(self, sheet_name_or_index):
         """

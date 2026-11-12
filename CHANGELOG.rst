@@ -1,6 +1,18 @@
 Changes
 =======
 
+Unreleased
+----------
+
+- Add worksheet-scoped defined-name resolution:
+  ``Sheet.defined_names`` / ``Sheet.defined_name`` and
+  ``Book.defined_names_for_sheet`` / ``Book.defined_name_for_sheet`` return
+  the names usable from a sheet (local names shadow global ones), the cell
+  areas they resolve to (including unions, 3D areas and caller-based relative
+  references), their transitive name dependencies, and separate reports for
+  external links and unresolvable branches so a half-available name is never
+  reported as complete.
+
 2.0.2 (14 June 2025)
 --------------------
 

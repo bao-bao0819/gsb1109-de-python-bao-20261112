@@ -37,6 +37,12 @@ xlrd.formula
 .. automodule:: xlrd.formula
    :members:
 
+xlrd.names
+----------
+
+.. automodule:: xlrd.names
+   :members:
+
 xlrd.sheet
 ----------
 

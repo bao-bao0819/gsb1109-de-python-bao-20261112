@@ -14,6 +14,7 @@ from .formula import (
     FMLA_TYPE_CELL, FMLA_TYPE_SHARED, decompile_formula, dump_formula,
     rangename2d,
 )
+from .names import resolve_named, resolve_visible_names
 from .timemachine import *
 
 DEBUG = 0
@@ -426,6 +427,42 @@ class Sheet(BaseObject):
         Refer to the documentation of the :class:`Cell` class.
         """
         return self._cell_types[rowx][colx]
+
+    def defined_names(self, base_rowx=None, base_colx=None,
+                      include_hidden=True, include_builtin=True):
+        """
+        Resolve every defined name usable from this worksheet.
+
+        Workbook-global names are visible from every sheet; a name local to
+        this sheet shadows a global name with the same case-insensitive
+        spelling.  Each result is a
+        :class:`~xlrd.names.NameResolution` describing the resolved cell
+        areas, external/unresolvable branches and the other names depended
+        on.
+
+        :param base_rowx: zero-based row of the calling cell, used as the
+           base for row-relative references.
+        :param base_colx: zero-based column of the calling cell, used as the
+           base for column-relative references.
+        """
+        return resolve_visible_names(
+            self.book, self.number, base_row=base_rowx, base_col=base_colx,
+            include_hidden=include_hidden, include_builtin=include_builtin,
+        )
+
+    def defined_name(self, name, base_rowx=None, base_colx=None):
+        """
+        Resolve one defined name as seen from this worksheet.
+
+        :raises xlrd.biffh.XLRDError: no visible name matches ``name``.
+
+        See :meth:`defined_names` for the meaning of ``base_rowx`` and
+        ``base_colx``.
+        """
+        return resolve_named(
+            self.book, self.number, name,
+            base_row=base_rowx, base_col=base_colx,
+        )
 
     def cell_xf_index(self, rowx, colx):
         """
