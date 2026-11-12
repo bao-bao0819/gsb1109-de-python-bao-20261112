@@ -14,6 +14,12 @@ API Guide
 .. automodule:: arrow.factory
     :members:
 
+:mod:`arrow.business_day`
+=========================
+
+.. automodule:: arrow.business_day
+    :members:
+
 :mod:`arrow.api`
 =====================
 

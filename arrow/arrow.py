@@ -16,6 +16,7 @@ from math import trunc
 from time import struct_time
 from typing import (
     Any,
+    Callable,
     ClassVar,
     Final,
     Generator,
@@ -24,6 +25,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    TYPE_CHECKING,
     Tuple,
     Union,
     cast,
@@ -36,6 +38,13 @@ from dateutil.relativedelta import relativedelta
 from arrow import formatter, locales, parser, util
 from arrow.constants import DEFAULT_LOCALE, DEHUMANIZE_LOCALES
 from arrow.locales import TimeFrameLiteral
+
+if TYPE_CHECKING:
+    from arrow.business_day import (
+        BusinessDay,
+        BusinessDayAssignment,
+        BusinessDayPartitioner,
+    )
 
 TZ_EXPR = Union[dt_tzinfo, str]
 
@@ -790,6 +799,36 @@ class Arrow:
                 yield intvlStart, intvlEnd
             except StopIteration:
                 return
+
+    # store business days
+
+    @classmethod
+    def business_day_partitioner(cls, rules: Any) -> "BusinessDayPartitioner":
+        """Build a :class:`~arrow.business_day.BusinessDayPartitioner` from store rules.
+
+        :param rules: one ``BusinessDayRule`` or a sequence of rules with
+            non-overlapping effective intervals.
+        """
+        from arrow.business_day import BusinessDayPartitioner
+
+        return BusinessDayPartitioner(rules)
+
+    @classmethod
+    def partition_business_days(
+        cls,
+        events: Iterable[Any],
+        rules: Any,
+        key: Optional[Callable[[Any], Any]] = None,
+    ) -> List["BusinessDayAssignment"]:
+        """Partition UTC events into store business days, in real time order.
+
+        See :class:`~arrow.business_day.BusinessDayPartitioner`.
+        """
+        return cls.business_day_partitioner(rules).partition(events, key=key)
+
+    def business_day(self, rules: Any) -> "BusinessDay":
+        """Return the store business day containing this Arrow instant."""
+        return self.business_day_partitioner(rules).business_day_of(self)
 
     # representations
 
