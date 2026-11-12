@@ -94,6 +94,30 @@ Rate Limiter
 
    .. automethod:: __init__
 
+GeoNames Pagination
++++++++++++++++++++
+
+.. automodule:: geopy.extra.geonames_pagination
+   :members: __doc__
+
+.. autoclass:: geopy.extra.geonames_pagination.GeoNamesPaginator
+
+   .. automethod:: __init__
+
+.. autoclass:: geopy.extra.geonames_pagination.PaginationResult
+
+.. autoclass:: geopy.extra.geonames_pagination.Checkpoint
+
+   .. automethod:: __init__
+
+.. autoclass:: geopy.extra.geonames_pagination.PendingRange
+
+.. autoclass:: geopy.extra.geonames_pagination.ReplayAdapter
+
+   .. automethod:: __init__
+
+.. autoclass:: geopy.extra.geonames_pagination.ReplayError
+
 ArcGIS
 ------
 

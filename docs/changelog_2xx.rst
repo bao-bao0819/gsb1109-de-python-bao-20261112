@@ -3,6 +3,22 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+New Features
+~~~~~~~~~~~~
+
+- :class:`.GeoNames`: add :mod:`geopy.extra.geonames_pagination`, an
+  offline-replayable, checkpointable pagination helper for bulk reads.
+  Pages are reconciled by the source's stable ``geonameId`` rather than
+  by the non-unique address text. A run is only reported as complete
+  when the caller declares a stable ordering (``orderBy``) and
+  end-of-data is observed; checkpoints detect movement of the first page
+  on resume and keep unauthenticated offset ranges pending until they
+  can be re-read. The accompanying ``ReplayAdapter`` records and replays
+  JSON responses without network access.
+
 .. _v2-5-0:
 
 2.5.0
