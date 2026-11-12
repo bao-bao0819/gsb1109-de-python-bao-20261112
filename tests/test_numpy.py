@@ -1,0 +1,133 @@
+"""Test interoperability with NumPy."""
+
+import pytest
+
+from affine import Affine
+
+try:
+    import numpy as np
+    from numpy import testing
+except ImportError:
+    pytest.skip("requires numpy", allow_module_level=True)
+
+
+def test_array():
+    """Affine instance has 9 elements, becomes 1-D Numpy array."""
+    assert np.array(Affine.identity()).shape == (9,)
+
+
+def test_linalg():
+    # cross-check properties with numpy's linear algebra module
+    ar = np.array(
+        [
+            [0, -2, 2],
+            [3, 0, 5],
+            [0, 0, 1],
+        ]
+    )
+    tfm = Affine(*ar.flatten())
+    assert tfm.determinant == pytest.approx(6.0)
+    assert np.linalg.det(ar) == pytest.approx(6.0)
+
+    expected_inv = np.array(
+        [
+            [0, 1 / 3, -5 / 3],
+            [-1 / 2, 0, 1],
+            [0, 0, 1],
+        ]
+    )
+    testing.assert_allclose(np.array(~tfm).reshape(3, 3), expected_inv)
+    testing.assert_allclose(np.linalg.inv(ar), expected_inv)
+
+
+def test_matmul_3x3_array():
+    A = Affine(2, 0, 3, 0, 3, 2)
+    Ar = np.array(A).reshape(3, 3)
+
+    # matrix @ matrix = matrix
+    res = A @ Affine.identity()
+    assert isinstance(res, Affine)
+    testing.assert_equal(np.array(res).reshape(3, 3), Ar)
+    res = Ar @ np.eye(3)
+    assert isinstance(res, np.ndarray)
+    testing.assert_equal(res, Ar)
+
+
+def test_matmul_vector():
+    A = Affine(2, 0, 3, 0, 3, 2)
+    Ar = np.array(A).reshape(3, 3)
+
+    # matrix @ vector = vector
+    v = (2, 3, 1)
+    vr = np.array(v)
+    expected_p = (7, 11, 1)
+    res = A @ v
+    assert isinstance(res, tuple)
+    testing.assert_equal(res, expected_p)
+    res = A @ vr
+    assert isinstance(res, tuple)
+    testing.assert_equal(res, expected_p)
+    res = Ar @ vr
+    assert isinstance(res, np.ndarray)
+    testing.assert_equal(res, expected_p)
+
+
+def test_matmul_items():
+    A = Affine(2, 0, 3, 0, 3, 2) @ Affine.rotation(45)
+    shape = (4, 5)
+    vx, vy = np.meshgrid(np.arange(shape[1]), np.arange(shape[0]))
+    expected_px = np.array(
+        [
+            [3.0, 4.4142137, 5.8284273, 7.2426405, 8.656855],
+            [1.5857865, 3.0, 4.4142137, 5.8284273, 7.2426405],
+            [0.17157288, 1.5857865, 3.0, 4.4142137, 5.8284273],
+            [-1.2426407, 0.17157288, 1.5857865, 3.0, 4.4142137],
+        ]
+    )
+    expected_py = np.array(
+        [
+            [2.0, 4.1213202, 6.2426405, 8.363961, 10.485281],
+            [4.1213202, 6.2426405, 8.363961, 10.485281, 12.606602],
+            [6.2426405, 8.363961, 10.485281, 12.606602, 14.727922],
+            [8.363961, 10.485281, 12.606602, 14.727922, 16.849243],
+        ]
+    )
+    px, py = A @ (vx, vy)
+    testing.assert_allclose(px, expected_px)
+    testing.assert_allclose(py, expected_py)
+
+    px, py, pw = A @ (vx, vy, 1)
+    testing.assert_allclose(px, expected_px)
+    testing.assert_allclose(py, expected_py)
+    assert pw == 1
+
+    px, py, pw = A @ (vx, vy, np.ones(shape))
+    testing.assert_allclose(px, expected_px)
+    testing.assert_allclose(py, expected_py)
+    testing.assert_array_equal(pw, np.ones(shape))
+
+    # see GH-125 with mul `*` op
+    with pytest.deprecated_call():
+        px, py = A * (vx, vy)
+    testing.assert_allclose(px, expected_px)
+    testing.assert_allclose(py, expected_py)
+
+
+def test_matmul_item_errors():
+    shape = (4, 5)
+    vx, vy = np.meshgrid(np.arange(shape[1]), np.arange(shape[0]))
+    with pytest.raises(ValueError, match=r"third value must be 1.0"):
+        Affine.identity() @ (vx, vy, 2)
+    with pytest.raises(ValueError, match=r"third values must all be 1.0"):
+        Affine.identity() @ (vx, vy, np.zeros(shape))
+    with pytest.raises(TypeError, match="2 or 3 items"):
+        Affine.identity() @ (vx, vy, np.ones(shape), np.ones(shape))
+
+
+def test_mul_item_errors():
+    shape = (4, 5)
+    vx, vy = np.meshgrid(np.arange(shape[1]), np.arange(shape[0]))
+    with pytest.raises(TypeError), pytest.deprecated_call():
+        Affine.identity() * (vx, vy, 1)
+    with pytest.raises(TypeError), pytest.deprecated_call():
+        Affine.identity() * (vx, vy, np.zeros(shape))

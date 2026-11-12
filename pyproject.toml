@@ -1,0 +1,91 @@
+[build-system]
+requires = ["flit_core >=3.11,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "affine"
+description = "Matrices describing affine transformation of the plane"
+dynamic = ["version"]
+authors = [
+    {name = "Sean Gillies", email = "sean.gillies@gmail.com"},
+]
+readme = "README.rst"
+keywords = ["affine", "transformation", "matrix"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Typing :: Typed",
+]
+license = "BSD-3-Clause"
+license-files = ["AUTHORS.txt", "LICENSE.txt"]
+requires-python = ">=3.9"
+dependencies = [
+    "attrs>=21.3.0",
+]
+
+[dependency-groups]
+dev = [
+    "coveralls>=3.0",
+    "pre-commit>=4.3.0",
+    "tox>=4.22",
+    {include-group = "tests"},
+]
+tests = [
+    "numpy>=1.20",
+    "pytest>=6.0",
+    "pytest-cov",
+]
+
+[project.urls]
+Source = "https://github.com/rasterio/affine"
+
+[tool.flit.sdist]
+include = [
+    "AUTHORS.txt",
+    "CHANGES.txt",
+    "LICENSE.txt",
+    "docs/",
+    "tests/",
+]
+exclude = ["docs/build/**"]
+
+[tool.pytest.ini_options]
+pythonpath = "src"
+testpaths = ["tests"]
+
+[tool.ruff.lint]
+select = [
+    "B",  # flake8-bugbear
+    "D",  # pydocstyle
+    "E", "W",  # pycodestyle
+    "F",  # Pyflakes
+    "I",  # isort
+    "NPY", # NumPy-specific rules
+    "PT", # flake8-pytest-style
+    "RET", # flake8-return
+    "RUF", # Ruff-specific rules
+    "SIM", # flake8-simplify
+    "UP", # pyupgrade
+]
+ignore = [
+    "D105",  # Missing docstring in magic method
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**.py" = ["B", "D"]
+"docs/**.py" = ["D"]
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
