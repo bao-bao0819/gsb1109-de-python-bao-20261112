@@ -189,6 +189,45 @@ file. This file is optional for reading. If it's available PyShp will use the
 shx file to access shape records a little faster but will do just fine without
 it.
 
+#### Recovering a Shapefile With a Missing or Damaged .shx
+
+If the .shx is missing or untrustworthy (for example the .shp was truncated
+mid-final-record), `Reader.recover_shp_index` rebuilds a read-only index by
+walking the actual on-disk record boundaries. The .shp is never modified.
+
+Coordinate bytes can themselves look just like a record header, so
+header-shaped bytes are treated only as candidates, never trusted blindly.
+Every internally consistent interpretation of the boundaries is enumerated,
+and only records whose boundaries **all** legal interpretations agree on are
+returned as randomly readable. Each remaining ambiguous or truncated byte
+range is reported as a pending interval, including the 1-based physical
+record numbers it affects. The result also carries the file length declared
+in the .shp header next to the actual file size, so the two can be compared.
+
+```python
+reader = shapefile.Reader("damaged.shp")
+result = reader.recover_shp_index()
+result.record_numbers       # physical (1-based) record numbers safe to read
+result.offsets_B            # their byte offsets in the .shp
+result.shape_lengths_B      # their content lengths in bytes
+result.pending_intervals    # unresolved ranges + affected record numbers
+result.header_file_length_B # length declared in the .shp header
+result.actual_file_length_B # bytes physically present
+```
+
+When the internal interpretations contradict each other, you can supply
+trusted anchors — byte offsets you already know are genuine record-header
+starts (e.g. from a backup). Interpretations that do not land on each anchor
+are discarded, which typically restores a unique reading:
+
+```python
+result = reader.recover_shp_index(trusted_anchors=[128])
+shape = reader.recovered_shape(2, trusted_anchors=[128])
+```
+
+`recovered_shape` raises `shapefile.ShapeIndexRecoveryError` for any record
+inside a pending interval, since its position cannot be guaranteed.
+
 #### Reading Shapefiles Using the Context Manager
 
 The "Reader" class can be used as a context manager, to ensure open file

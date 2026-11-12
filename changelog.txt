@@ -1,3 +1,7 @@
+VERSION 3.1.9
+2026-11-13
+	* Added read-only .shp index recovery (Reader.recover_shp_index / ShpReader.recover_index) for shapefiles whose .shx is missing or untrustworthy, including a truncated final record. It enumerates every internally consistent reading of the record boundaries, exposes only the records all legal interpretations agree on for random access (Reader.recovered_shape), reports each unresolved byte interval and the physical record numbers it affects, compares the rebuilt index against the .shp header length, and accepts caller-supplied trusted anchor offsets to disambiguate damaged regions. A .shp whose header declares a length larger than the file now warns and stays openable instead of raising, so recovery can inspect the surviving records.
+
 VERSION 3.1.8
 2026-11-07
 	* Avoid unnecessary seeks in Reader.iterShapeRecords with a bbox.  Removed lots of deletion field checks (prefer dbfReader.data_fields). Replace two while loops with simpler alternatives.

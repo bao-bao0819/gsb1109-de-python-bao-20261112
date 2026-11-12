@@ -1364,6 +1364,175 @@ def test_reader_corrupt_shape_record_header(corrupt_shape_length_16bw: int):
             reader.shape(i=-1)
 
 
+def _point_shp_buffers(num_points: int = 5):
+    """Builds an in-memory .shp/.shx pair of simple POINT records."""
+    shp, shx = io.BytesIO(), io.BytesIO()
+    with shapefile.Writer(shp=shp, shx=shx) as writer:
+        for index in range(num_points):
+            writer.shape(shapefile.Point(float(index), float(index)))
+    shp.seek(0)
+    shx.seek(0)
+    return shp, shx
+
+
+def test_recover_index_reproduces_real_shx():
+    """On an intact, variable-record .shp the rebuilt index must exactly match
+    the shipped .shx, with no unresolved intervals and matching header length."""
+    shp_path = shapefiles_dir / "blockgroups.shp"
+    shx_path = shapefiles_dir / "blockgroups.shx"
+    shp_bytes = shp_path.read_bytes()
+
+    reference = shapefile.Reader(
+        shp=io.BytesIO(shp_bytes), shx=io.BytesIO(shx_path.read_bytes())
+    )
+    result = shapefile.Reader(shp=io.BytesIO(shp_bytes)).recover_shp_index()
+
+    assert result.offsets_B == reference.shx_reader.offsets
+    assert result.shape_lengths_B == reference.shx_reader.shape_lengths_B
+    assert result.record_numbers == list(range(1, len(result.offsets_B) + 1))
+    assert result.pending_intervals == []
+    assert result.header_file_length_B == result.actual_file_length_B == len(shp_bytes)
+
+
+def test_recover_index_healthy_and_random_read():
+    shp_buf, _shx_buf = _point_shp_buffers()
+    shp_bytes = shp_buf.read()
+    reader = shapefile.Reader(shp=io.BytesIO(shp_bytes))
+
+    result = reader.recover_shp_index()
+    assert result.record_numbers == [1, 2, 3, 4, 5]
+    assert result.pending_intervals == []
+
+    # Only-agreed records are randomly readable with the correct geometry.
+    assert reader.recovered_shape(1).points == [(0.0, 0.0)]
+    assert reader.recovered_shape(5).points == [(4.0, 4.0)]
+    # The .shp is never modified.
+    reader.shp_reader.file.seek(0)
+    assert reader.shp_reader.file.read() == shp_bytes
+
+
+def test_recover_index_ignores_header_like_coordinate_bytes():
+    """Header-shaped bytes inside a record that causes no contradiction must
+    not be mistaken for a real boundary."""
+    shp_bytes, _shx_bytes = (buf.read() for buf in _point_shp_buffers())
+    doctored = bytearray(shp_bytes)
+    # Plant a credible-looking (recnum 1, valid POINT type) header inside
+    # record 1's coordinate area.  Record 1's own chain still resolves, so no
+    # ambiguity is allowed to arise.
+    struct.pack_into(">2i", doctored, 116, 1, 4)
+    struct.pack_into("<i", doctored, 124, shapefile.POINT)
+
+    result = shapefile.Reader(shp=io.BytesIO(bytes(doctored))).recover_shp_index()
+    assert result.record_numbers == [1, 2, 3, 4, 5]
+    assert result.pending_intervals == []
+
+
+def test_recover_index_truncated_final_record():
+    shp_bytes, shx_bytes = (buf.read() for buf in _point_shp_buffers())
+    last_offset = shapefile.Reader(
+        shp=io.BytesIO(shp_bytes), shx=io.BytesIO(shx_bytes)
+    ).shx_reader.offsets[-1]
+    # Keep the final record header but cut most of its content.
+    truncated = shp_bytes[: last_offset + 12]
+
+    with pytest.warns(shapefile.PossiblyCorruptFileHeader):
+        reader = shapefile.Reader(shp=io.BytesIO(truncated))
+    result = reader.recover_shp_index()
+
+    assert result.record_numbers == [1, 2, 3, 4]
+    assert result.header_file_length_B > result.actual_file_length_B
+    assert len(result.pending_intervals) == 1
+    interval = result.pending_intervals[0]
+    assert interval.start_B == last_offset
+    assert interval.end_B == len(truncated)
+    assert (interval.first_record, interval.last_record) == (5, 5)
+    assert "truncated" in interval.reason
+
+    # Earlier records remain randomly readable; the truncated one does not.
+    assert reader.recovered_shape(4).points == [(3.0, 3.0)]
+    with pytest.raises(shapefile.ShapeIndexRecoveryError):
+        reader.recovered_shape(5)
+
+
+def test_recover_index_contradiction_resolved_by_trusted_anchor():
+    shp_bytes, shx_bytes = (buf.read() for buf in _point_shp_buffers())
+    real_offsets = shapefile.Reader(
+        shp=io.BytesIO(shp_bytes), shx=io.BytesIO(shx_bytes)
+    ).shx_reader.offsets
+
+    damaged = bytearray(shp_bytes)
+    # A false header inside record 1 ...
+    struct.pack_into(">2i", damaged, 116, 1, 4)
+    struct.pack_into("<i", damaged, 124, shapefile.POINT)
+    # ... plus a corrupted record-1 length that breaks the chain.
+    struct.pack_into(">i", damaged, 104, 6)
+    reader = shapefile.Reader(shp=io.BytesIO(bytes(damaged)))
+
+    # Without an anchor nothing past the damaged region is trustworthy.
+    ambiguous = reader.recover_shp_index()
+    assert ambiguous.record_numbers == []
+    assert ambiguous.pending_intervals[0].first_record == 1
+    with pytest.raises(shapefile.ShapeIndexRecoveryError):
+        reader.recovered_shape(2)
+
+    # A trusted anchor at the genuine second record disambiguates everything.
+    resolved = reader.recover_shp_index(trusted_anchors=[real_offsets[1]])
+    assert resolved.record_numbers == [1, 2, 3, 4, 5]
+    assert resolved.pending_intervals == []
+    assert reader.recovered_shape(
+        2, trusted_anchors=[real_offsets[1]]
+    ).points == [(1.0, 1.0)]
+
+
+def test_recover_index_mid_damage_keeps_agreed_prefix():
+    shp_bytes, _shx_bytes = (buf.read() for buf in _point_shp_buffers())
+    damaged = bytearray(shp_bytes)
+    # Corrupt record 3's length (header starts at byte 156) so its computed
+    # end has no credible header.
+    struct.pack_into(">i", damaged, 160, 6)
+
+    result = shapefile.Reader(shp=io.BytesIO(bytes(damaged))).recover_shp_index()
+    assert result.record_numbers == [1, 2]
+    interval = result.pending_intervals[0]
+    assert interval.start_B == 156
+    assert interval.first_record == 3
+
+
+def test_recover_index_truncated_inside_final_header():
+    shp_bytes, shx_bytes = (buf.read() for buf in _point_shp_buffers())
+    last_offset = shapefile.Reader(
+        shp=io.BytesIO(shp_bytes), shx=io.BytesIO(shx_bytes)
+    ).shx_reader.offsets[-1]
+    # Cut 4 bytes into the final record's 8-byte header: not enough bytes
+    # remain for a full header, so this must read as truncation, not ambiguity.
+    cut_mid_header = shp_bytes[: last_offset + 4]
+
+    result = shapefile.Reader(shp=io.BytesIO(cut_mid_header)).recover_shp_index()
+    assert result.record_numbers == [1, 2, 3, 4]
+    interval = result.pending_intervals[0]
+    assert interval.start_B == last_offset
+    assert (interval.first_record, interval.last_record) == (5, 5)
+    assert "truncated" in interval.reason
+
+
+def test_recover_index_rejects_unusable_anchors():
+    shp_bytes, _shx_bytes = (buf.read() for buf in _point_shp_buffers())
+    reader = shapefile.Reader(shp=io.BytesIO(shp_bytes))
+
+    with pytest.raises(shapefile.ShapeIndexRecoveryError):
+        reader.recover_shp_index(trusted_anchors=[10_000])
+    # 176 is a legal offset but no complete interpretation lands a boundary there.
+    with pytest.raises(shapefile.ShapeIndexRecoveryError):
+        reader.recover_shp_index(trusted_anchors=[176])
+
+
+def test_recover_index_requires_shp():
+    reader = shapefile.Reader()
+    assert reader._shp is None
+    with pytest.raises(shapefile.ShapefileException):
+        reader.recover_shp_index()
+
+
 
 
 def test_bboxfilter_shape():

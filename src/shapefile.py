@@ -177,6 +177,56 @@ class PossiblyCorruptFileHeader(Warning):
     """A Warning of inconsistent file meta data in a .shp or .shx header ."""
 
 
+class ShapeIndexRecoveryError(ShapefileException):
+    """Raised when no internally consistent interpretation of the .shp
+    record boundaries can be found (e.g. every candidate boundary
+    contradicts a trusted anchor, or no complete record exists), or when a
+    caller attempts random access to a record whose boundaries are not
+    agreed upon by every legal interpretation."""
+
+
+class PendingIndexInterval(NamedTuple):
+    """A byte range in the .shp file whose record boundaries cannot be
+    agreed upon by every legal interpretation.
+
+    ``start_B`` / ``end_B`` bound the ambiguous bytes (``end_B`` is the
+    first position past the range).  ``first_record`` / ``last_record`` are
+    the 1-based physical record numbers (the Esri record-number field,
+    counted from record 1 at byte offset 100) that the different legal
+    interpretations assign inside this interval, i.e. the range of physical
+    record numbers whose positions are not safe for random access.
+    """
+
+    start_B: int
+    end_B: int
+    first_record: int
+    last_record: int
+    reason: str
+
+
+class ShapeIndexRecoveryResult(NamedTuple):
+    """Outcome of rebuilding a usable index for a .shp without a
+    trustworthy .shx file.
+
+    ``offsets_B`` and ``shape_lengths_B`` describe only the records whose
+    boundaries every surviving legal interpretation agrees on, so each is
+    safe for random access.  ``record_numbers`` are the corresponding
+    1-based physical record numbers (record ``k`` is the k-th record from
+    the start of the .shp, matching the Esri record-number field).
+    ``pending_intervals`` describes every unresolved byte range and the
+    physical record numbers affected within it.  ``header_file_length_B``
+    is the file length declared in the .shp header (in bytes), compared
+    against the actual file size in ``actual_file_length_B``.
+    """
+
+    offsets_B: list[int]
+    shape_lengths_B: list[int]
+    record_numbers: list[int]
+    pending_intervals: list[PendingIndexInterval]
+    header_file_length_B: int
+    actual_file_length_B: int
+
+
 def _min_not_None(m1: float | None, m2: float | None) -> float | None:
     if m1 is None:
         return m2
@@ -3458,7 +3508,20 @@ class ShpReader(_HasCheckedReadableFile):
                 for m_bound in unpack("<2d", self.file.read(16))
             )
         )
-        self._check_file_length(self.shp_file_size_B)
+        # A .shp whose header claims more bytes than are physically present is
+        # typically truncated mid-final-record.  It must stay openable so the
+        # read-only index recovery entry point (ShpReader.recover_index) can
+        # inspect the surviving records, hence warn rather than raise here.
+        if self.shp_file_size_B > self.file_size_B:
+            file_name = getattr(self.file, "name", self.ext)
+            warnings.warn(
+                f"Declared file size: {self.shp_file_size_B} in {file_name} header"
+                f" larger than actual file size: {self.file_size_B} (bytes);"
+                " the final record may be truncated.",
+                category=PossiblyCorruptFileHeader,
+            )
+        else:
+            self._check_file_length(self.shp_file_size_B)
 
     @functools.cache  # Only read through the shape headers (e.g. on disk), at most once.
     def _headers_cached_gen(self) -> Iterator[ShapeHeaderInfoT]:
@@ -3496,6 +3559,321 @@ class ShpReader(_HasCheckedReadableFile):
 
     def cache_all_headers(self) -> None:
         self.shape_header(-1)
+
+    # ------------------------------------------------------------------
+    # Read-only index recovery for .shp files with a missing / damaged
+    # .shx (possibly with a truncated final record).
+    #
+    # A .shp record is an 8-byte big-endian header (record number, content
+    # length in 16-bit words) followed by that many content bytes.  Content
+    # bytes can themselves look just like a record header (e.g. little-endian
+    # coordinate doubles), so a header-shaped 8-byte window is never trusted
+    # on its own: it is only a *candidate* boundary.  Every internally
+    # consistent interpretation of the record boundaries is enumerated, and
+    # only the records every surviving interpretation agrees on are published
+    # as randomly readable.
+    # ------------------------------------------------------------------
+
+    # Maximum number of competing interpretations retained before asking the
+    # caller for trusted anchors, to keep pathological damage bounded.
+    _MAX_RECOVERY_INTERPRETATIONS = 1024
+
+    def _read_candidate_header(
+        self, data: bytes, pos: int, expected_rec_num: int | None = None
+    ) -> int | None:
+        """Returns the content length in bytes if ``pos`` holds a credible
+        record header, else None.
+
+        A candidate needs a positive declared content length (in 16-bit
+        words) and a following 4-byte shape-type code of NULL or the .shp
+        file's declared shape type: coordinate bytes that merely resemble a
+        header are therefore not mistaken for a real record boundary.  When
+        ``expected_rec_num`` is given the big-endian record number must also
+        be that sequential number (or non-positive, tolerating a zeroed
+        number field), rejecting header-shaped coordinate bytes carrying the
+        wrong positive record number.
+        """
+        if pos < 0 or pos + 12 > len(data):
+            # Need the 8-byte header plus the 4-byte shape type code.
+            return None
+        rec_num, rec_length_16bw = unpack(">2i", data[pos : pos + 8])
+        if rec_length_16bw <= 0:
+            return None
+        if expected_rec_num is not None and rec_num > 0 and rec_num != expected_rec_num:
+            return None
+        (shape_type,) = unpack("<i", data[pos + 8 : pos + 12])
+        if shape_type != NULL and shape_type != self.shapeType:
+            return None
+        return 2 * rec_length_16bw
+
+    def _scan_candidate_headers(
+        self,
+        data: bytes,
+        start: int,
+        expected_rec_num: int,
+        anchor_set: set[int],
+    ) -> list[int]:
+        """Forward-scans from ``start`` up to EOF for credible record-header
+        positions after a contradiction.  Candidates must carry the expected
+        sequential record number (a non-positive number field is tolerated),
+        except that trusted anchor positions are always accepted even if
+        their number field was damaged."""
+        candidates: list[int] = []
+        for pos in range(max(100, start), len(data) - 11):
+            if pos in anchor_set:
+                candidates.append(pos)
+            elif self._read_candidate_header(data, pos, expected_rec_num) is not None:
+                candidates.append(pos)
+        return candidates
+
+    def _interpretation_respects_anchors(
+        self, path: Sequence[int], anchor_set: set[int], eof: int
+    ) -> bool:
+        """True if no trusted anchor is ever straddled by a record span and
+        every anchor inside the covered range lands on a boundary."""
+        covered = path[-1]
+        for anchor in anchor_set:
+            if anchor >= eof:
+                continue
+            if anchor <= covered and anchor not in path:
+                return False
+            for left, right in zip(path, path[1:]):
+                if left < anchor < right:
+                    return False
+        return True
+
+    def _enumerate_boundary_interpretations(
+        self, data: bytes, trusted_anchors: Sequence[int]
+    ) -> list[list[int]]:
+        """Enumerates every sequence of record-boundary offsets (the first
+        always being byte 100) consistent with the candidate headers and EOF.
+
+        Following a credible header's declared length is only one hypothesis.
+        When that hypothesis reaches a position with no credible header (a
+        contradiction), the boundary just reached is discredited: the parser
+        backtracks to the preceding trustworthy boundary and forward-scans for
+        every credible header after it, spawning one interpretation per
+        candidate instead of blindly trusting the next header-shaped bytes.
+        An interpretation whose final header declares more content than the
+        file holds is retained as the truncated-tail reading, but that record
+        is never randomly readable.  Trusted anchors are enforced afterwards.
+        """
+        eof = len(data)
+        anchor_set = set(trusted_anchors)
+        invalid_anchor = next(
+            (a for a in anchor_set if a < 100 or a >= eof), None
+        )
+        if invalid_anchor is not None:
+            raise ShapeIndexRecoveryError(
+                f"Trusted anchor offset {invalid_anchor} is outside the .shp "
+                f"file (100..{eof - 1})."
+            )
+
+        worklist: list[list[int]] = [[100]]
+        finals: list[list[int]] = []
+        seen: set[tuple[int, ...]] = {(100,)}
+
+        def push(new_path: list[int]) -> None:
+            key = tuple(new_path)
+            if key not in seen:
+                seen.add(key)
+                worklist.append(new_path)
+
+        while worklist:
+            path = worklist.pop()
+            pos = path[-1]
+            # The header at the current boundary is record number len(path)
+            # (boundaries are counted from record 1 at byte offset 100).
+            expected_rec_num = len(path)
+
+            if pos == eof:
+                finals.append(path)
+                continue
+
+            content_length_B = self._read_candidate_header(
+                data, pos, expected_rec_num
+            )
+            if content_length_B is not None:
+                end = pos + 8 + content_length_B
+                if end <= eof:
+                    push(path + [end])
+                    continue
+                # The header at pos declares content past EOF: a complete
+                # reading ending in a truncated final record.
+                finals.append(path)
+                continue
+
+            if pos + 12 > eof:
+                # Not enough bytes remain for even a full record header plus
+                # shape-type code: the final record's header itself is cut
+                # off.  This is truncation, not a boundary contradiction, so
+                # the reading terminates here without backtracking.
+                finals.append(path)
+                continue
+
+            # Contradiction: enough bytes remain but they do not form a
+            # credible header.  Backtrack to the preceding trustworthy
+            # boundary and rescan everything after it for alternative
+            # candidate headers carrying the same sequential record number
+            # as the discredited boundary.
+            previous = path[-2] if len(path) >= 2 else 100
+            candidates = self._scan_candidate_headers(
+                data, previous + 1, expected_rec_num, anchor_set
+            )
+            if not candidates:
+                # Dead end: this reading cannot reach EOF, so it is discarded
+                # rather than allowed to dilute the boundary consensus.
+                continue
+            base = path[:-1] if len(path) >= 2 else [100]
+            for candidate in candidates:
+                push(base + [candidate])
+
+            if len(seen) > self._MAX_RECOVERY_INTERPRETATIONS:
+                raise ShapeIndexRecoveryError(
+                    f"Over {self._MAX_RECOVERY_INTERPRETATIONS} competing "
+                    "boundary interpretations were found; supply trusted_anchors "
+                    "(byte offsets of known record headers) to disambiguate "
+                    "the damaged region."
+                )
+
+        # Deduplicate identical interpretations and apply the anchor rules.
+        unique_paths = [list(path) for path in {tuple(p) for p in finals}]
+        legal_paths = [
+            path
+            for path in unique_paths
+            if self._interpretation_respects_anchors(path, anchor_set, eof)
+        ]
+        reached = {offset for path in legal_paths for offset in path}
+        missing = sorted(anchor_set - reached)
+        if missing:
+            raise ShapeIndexRecoveryError(
+                "No legal interpretation of the .shp record boundaries reaches "
+                f"the trusted anchor offset(s): {missing}."
+            )
+        if not legal_paths:
+            raise ShapeIndexRecoveryError(
+                "No internally consistent interpretation of the .shp record "
+                "boundaries could be found."
+            )
+        return legal_paths
+
+    @staticmethod
+    def _common_prefix_offsets(paths: Sequence[list[int]]) -> list[int]:
+        """Boundary offsets present, at the same ordinal record position, in
+        every interpretation.  Only these records can be read randomly with
+        certainty."""
+        shortest = min(len(path) for path in paths)
+        agreed: list[int] = []
+        for index in range(shortest):
+            offset = paths[0][index]
+            if all(path[index] == offset for path in paths):
+                agreed.append(offset)
+            else:
+                break
+        return agreed
+
+    def _build_pending_interval(
+        self,
+        paths: Sequence[list[int]],
+        agreed_offsets: Sequence[int],
+        data: bytes,
+    ) -> PendingIndexInterval | None:
+        """Builds the single unresolved tail interval, or None if every
+        interpretation agrees all the way to EOF.
+
+        The interval starts at the last boundary all interpretations agree
+        on (byte 100 when nothing is agreed) and runs to EOF.  Its record
+        numbers are 1-based physical numbers: the first is the record starting
+        at that boundary, the last is the greatest record slot any surviving
+        interpretation uses.
+        """
+        eof = len(data)
+        start_B = agreed_offsets[-1]
+        if start_B >= eof:
+            return None
+
+        first_record = len(agreed_offsets)  # boundary count == records before it + 1
+        last_record = max(len(path) for path in paths)
+
+        truncated = False
+        declared_length = self._read_candidate_header(data, start_B, first_record)
+        if declared_length is not None and start_B + 8 + declared_length > eof:
+            truncated = True
+        elif eof - start_B < 12:
+            # The final record's own header (8 bytes plus the shape-type code)
+            # is cut off mid-header.
+            truncated = True
+        reason = "record boundaries not agreed by all legal interpretations"
+        if truncated:
+            reason += "; final record is truncated before its declared length"
+        return PendingIndexInterval(
+            start_B=start_B,
+            end_B=eof,
+            first_record=first_record,
+            last_record=last_record,
+            reason=reason,
+        )
+
+    def recover_index(
+        self,
+        trusted_anchors: Sequence[int] | None = None,
+    ) -> ShapeIndexRecoveryResult:
+        """Rebuilds a read-only record index for this .shp by walking the
+        actual record boundaries, without trusting any .shx.
+
+        ``trusted_anchors`` is an optional sequence of byte offsets the
+        caller knows are genuine record-header starts (e.g. offsets carried
+        over from a backup or a sibling data source).  Interpretations that do
+        not place a record boundary exactly at each anchor are discarded.
+
+        Only records whose boundaries every surviving legal interpretation
+        agrees on are returned as randomly readable; every remaining
+        ambiguous (or truncated) byte range is reported in
+        :attr:`ShapeIndexRecoveryResult.pending_intervals`, including the
+        physical (1-based) record numbers affected.  The file length declared
+        in the .shp header is returned alongside the actual file size so the
+        caller can compare the two.  The .shp file itself is never modified.
+        """
+        trusted_anchors = list(trusted_anchors or ())
+        self.file.seek(0)
+        data = self.file.read()
+
+        header_file_length_B = self.shp_file_size_B
+        actual_file_length_B = len(data)
+
+        paths = self._enumerate_boundary_interpretations(data, trusted_anchors)
+        agreed_offsets = self._common_prefix_offsets(paths)
+
+        offsets_B: list[int] = []
+        shape_lengths_B: list[int] = []
+        record_numbers: list[int] = []
+        # Every consecutive pair of agreed boundaries is a record every
+        # interpretation agrees on; the trailing boundary starts the pending
+        # interval (or equals EOF) and is not randomly readable on its own.
+        for ordinal in range(len(agreed_offsets) - 1):
+            header_offset = agreed_offsets[ordinal]
+            next_boundary = agreed_offsets[ordinal + 1]
+            # The usable content length comes from the agreed boundary span,
+            # not the length field inside the (possibly damaged) header.
+            content_length_B = next_boundary - header_offset - 8
+            if content_length_B <= 0:
+                break
+            offsets_B.append(header_offset)
+            shape_lengths_B.append(content_length_B)
+            record_numbers.append(ordinal + 1)
+
+        pending_interval = self._build_pending_interval(
+            paths, agreed_offsets, data
+        )
+        pending = [pending_interval] if pending_interval is not None else []
+        return ShapeIndexRecoveryResult(
+            offsets_B=offsets_B,
+            shape_lengths_B=shape_lengths_B,
+            record_numbers=record_numbers,
+            pending_intervals=pending,
+            header_file_length_B=header_file_length_B,
+            actual_file_length_B=actual_file_length_B,
+        )
 
     @functools.cached_property
     def offsets(self) -> list[int]:
@@ -3681,6 +4059,7 @@ class Reader(_HasExitStack):
         self._shx = None
         self._dbf = None
         self._cpg = None
+        self._recovered_index_result: ShapeIndexRecoveryResult | None = None
         self.shapeName = "Not specified"
         self.numShapes: int = 0
         self.path: str | os.PathLike[Any] | None = None
@@ -4203,6 +4582,64 @@ class Reader(_HasExitStack):
         else:
             offset, shape_len_B = None, None
         return self.shp_reader.shape(i, offset, shape_len_B, bbox)
+
+    def recover_shp_index(
+        self,
+        trusted_anchors: Sequence[int] | None = None,
+    ) -> ShapeIndexRecoveryResult:
+        """Read-only recovery entry point for a .shp whose .shx is missing or
+        untrustworthy (the final record may be truncated).
+
+        Rebuilds a usable index from the actual on-disk record boundaries,
+        compares the result against the file length declared in the .shp
+        header, and returns the agreed, randomly-readable records together
+        with every unresolved interval and the physical record numbers it
+        affects.  ``trusted_anchors`` optionally supplies byte offsets of
+        record headers the caller already trusts, which prunes interpretations
+        that fail to land on them.  The .shp is opened read-only and is never
+        modified; the result is cached for the lifetime of this Reader.
+        """
+        if self._shp is None:
+            raise ShapefileException(
+                "Index recovery requires a .shp file or file-like object."
+            )
+        if self._recovered_index_result is None or trusted_anchors:
+            result = self.shp_reader.recover_index(trusted_anchors)
+            if not trusted_anchors:
+                self._recovered_index_result = result
+            return result
+        return self._recovered_index_result
+
+    def recovered_shape(
+        self,
+        record_number: int,
+        bbox: BBox | None = None,
+        trusted_anchors: Sequence[int] | None = None,
+    ) -> Shape | None:
+        """Randomly reads physical record ``record_number`` (1-based, matching
+        the Esri record numbering that starts at 1 at byte offset 100), but
+        only if every legal boundary interpretation agrees on that record.
+
+        ``trusted_anchors`` is forwarded to :meth:`recover_shp_index` to
+        disambiguate damaged regions.  Raises :class:`ShapeIndexRecoveryError`
+        if the record lies inside an unresolved (ambiguous or truncated)
+        interval, in which case its position cannot be trusted for random
+        access.  Call :meth:`recover_shp_index` first to inspect the pending
+        intervals.
+        """
+        result = self.recover_shp_index(trusted_anchors)
+        if record_number not in result.record_numbers:
+            raise ShapeIndexRecoveryError(
+                f"Physical record {record_number} is not safely readable: its "
+                "boundaries are not agreed by every legal interpretation (see "
+                "ShapeIndexRecoveryResult.pending_intervals)."
+            )
+        aligned = result.record_numbers.index(record_number)
+        offset = result.offsets_B[aligned]
+        shape_len_B = result.shape_lengths_B[aligned]
+        return self.shp_reader.shape(
+            record_number - 1, offset, shape_len_B, bbox
+        )
 
     def shapes(self, bbox: BBox | None = None) -> Shapes:
         """Returns all shapes in a shapefile.
