@@ -94,6 +94,36 @@ Rate Limiter
 
    .. automethod:: __init__
 
+Queue Scheduler
++++++++++++++++
+
+:mod:`geopy.extra.queue_scheduler` coordinates multiple request queues
+(such as a nightly address backfill and interactive single-address
+lookups) against one geocoder quota. Queues assigned the same source
+account share an interval budget, a long queue is guaranteed an explicit
+minimum share of the dispatch slots, requests may carry deadlines, and
+retries keep deducting the shared budget. The scheduler is driven by a
+pluggable clock, so its behavior can be verified deterministically with
+:class:`~geopy.extra.queue_scheduler.ManualClock` without contacting any
+map service.
+
+.. automodule:: geopy.extra.queue_scheduler
+   :members: __doc__
+
+.. autoclass:: geopy.extra.queue_scheduler.QueueScheduler
+
+   .. automethod:: __init__
+
+.. autoclass:: geopy.extra.queue_scheduler.SharedIntervalBudget
+
+.. autoclass:: geopy.extra.queue_scheduler.ManualClock
+
+   .. automethod:: __init__
+
+.. autoclass:: geopy.extra.queue_scheduler.GeocoderRequest
+
+.. autoclass:: geopy.extra.queue_scheduler.RequestStatus
+
 ArcGIS
 ------
 
