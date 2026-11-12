@@ -94,6 +94,27 @@ Rate Limiter
 
    .. automethod:: __init__
 
+Offline Reverse Cache
++++++++++++++++++++++
+
+.. automodule:: geopy.extra.reverse_cache
+   :members: __doc__
+
+.. autoclass:: geopy.extra.reverse_cache.OfflineReverseCache
+   :members:
+
+.. autoclass:: geopy.extra.reverse_cache.CacheRecord
+   :members:
+
+.. autoclass:: geopy.extra.reverse_cache.ValidityRegion
+   :members:
+
+.. autoclass:: geopy.extra.reverse_cache.CacheDecision
+   :members:
+
+.. autoclass:: geopy.extra.reverse_cache.Rejudication
+   :members:
+
 ArcGIS
 ------
 
