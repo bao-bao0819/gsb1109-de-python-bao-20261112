@@ -42,12 +42,23 @@ import warnings
 
 from attrs import astuple, define, field
 
-__all__ = ["Affine"]
+__all__ = [
+    "Affine",
+    "GridAlignment",
+    "Window",
+    "align_grid",
+]
 __author__ = "Sean Gillies"
 __version__ = "3.0.1"
 
 EPSILON: float = 1e-5
 EPSILON2: float = 1e-10
+
+# Default tolerance for aligning two pixel grids, expressed as a fraction
+# of the smaller pixel size.  It is deliberately much tighter than a
+# pixel: a grid is either shared exactly (up to floating-point noise) or
+# resampling would be required.
+DEFAULT_GRID_TOLERANCE: float = 1e-6
 
 
 class AffineError(Exception):
@@ -60,6 +71,159 @@ class TransformNotInvertibleError(AffineError):
 
 class UndefinedRotationError(AffineError):
     """The rotation angle could not be computed for this transform."""
+
+
+class GridAlignmentError(AffineError):
+    """Two raster grids cannot be mapped onto one another by whole pixels."""
+
+
+#: The signed permutation matrices, as ``(a, b, d, e)`` coefficients, that
+#: preserve a square pixel grid.  They express axis order swaps and flips in
+#: addition to the identity.
+_GRID_PERMUTATIONS = (
+    (1, 0, 0, 1),
+    (1, 0, 0, -1),
+    (-1, 0, 0, 1),
+    (-1, 0, 0, -1),
+    (0, 1, 1, 0),
+    (0, 1, -1, 0),
+    (0, -1, 1, 0),
+    (0, -1, -1, 0),
+)
+
+
+@define(frozen=True)
+class Window:
+    """A half-open window of pixels in a raster.
+
+    Coordinates are rows and columns, matching the ``(row, col)`` convention
+    of raster shapes.  ``row_stop`` and ``col_stop`` are exclusive, so the
+    number of pixels is ``height * width``.  A window with a zero height or
+    width contains no pixels; this is how edge-only and corner-only contact
+    is represented.
+    """
+
+    row_start: int = field(converter=int)
+    row_stop: int = field(converter=int)
+    col_start: int = field(converter=int)
+    col_stop: int = field(converter=int)
+
+    def __attrs_post_init__(self) -> None:
+        if self.row_start < 0 or self.col_start < 0:
+            raise ValueError("window starts must be non-negative")
+        if self.row_stop < self.row_start or self.col_stop < self.col_start:
+            raise ValueError("window stops must not precede their starts")
+
+    @property
+    def height(self) -> int:
+        """Number of rows in the window."""
+        return self.row_stop - self.row_start
+
+    @property
+    def width(self) -> int:
+        """Number of columns in the window."""
+        return self.col_stop - self.col_start
+
+    @property
+    def count(self) -> int:
+        """Number of pixels in the window."""
+        return self.height * self.width
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """The ``(rows, cols)`` shape of the window."""
+        return (self.height, self.width)
+
+    @property
+    def is_empty(self) -> bool:
+        """True if the window contains no pixels."""
+        return self.count == 0
+
+
+@define(frozen=True)
+class GridAlignment:
+    """A whole-pixel mapping from one raster grid to another.
+
+    The mapping is expressed in pixel corner coordinates::
+
+        col_b = a * col_a + b * row_a + col_offset
+        row_b = d * col_a + e * row_a + row_offset
+
+    ``a``, ``b``, ``d``, and ``e`` form a signed permutation matrix, so the
+    mapping may translate by whole pixels, swap the row and column axes, and
+    flip either axis.  It may not rotate by an angle that is not a multiple of
+    90 degrees, scale, or shear.
+
+    Attributes
+    ----------
+    column_mapping, row_mapping : tuple of three ints
+        ``(coefficient for col_a, coefficient for row_a, offset)`` for the
+        destination column and row respectively.
+    transform : Affine
+        The same mapping as an affine transform from source pixel corner
+        coordinates to destination pixel corner coordinates.
+    worst_case_deviation : float
+        The largest grid-point discrepancy, in world units, over the full
+        source and destination extents.  It is evaluated at the corners of
+        both coverages, where the extrema of this affine residual must occur.
+    worst_case_deviation_pixels : float
+        The same discrepancy expressed in source pixels.
+    tolerance : float
+        The acceptance tolerance in pixels that was used.
+    overlap_a, overlap_b : Window
+        The overlapping pixel window in the source and destination raster.
+        Either is empty when the rasters have no area overlap, including when
+        they meet only along an edge or at a corner.
+    """
+
+    column_mapping: tuple[int, int, int]
+    row_mapping: tuple[int, int, int]
+    transform: Affine
+    worst_case_deviation: float
+    worst_case_deviation_pixels: float
+    tolerance: float
+    overlap_a: Window
+    overlap_b: Window
+
+    @property
+    def permutation(self) -> tuple[int, int, int, int]:
+        """The signed permutation matrix as ``(a, b, d, e)``."""
+        return (
+            self.column_mapping[0],
+            self.column_mapping[1],
+            self.row_mapping[0],
+            self.row_mapping[1],
+        )
+
+    @property
+    def offset(self) -> tuple[int, int]:
+        """The integer ``(col, row)`` translation in destination pixels."""
+        return (self.column_mapping[2], self.row_mapping[2])
+
+    def map_to_b(self, col: int, row: int) -> tuple[int, int]:
+        """Map a source pixel corner ``(col, row)`` to destination pixels."""
+        return (
+            self.column_mapping[0] * col
+            + self.column_mapping[1] * row
+            + self.column_mapping[2],
+            self.row_mapping[0] * col + self.row_mapping[1] * row + self.row_mapping[2],
+        )
+
+    def map_to_a(self, col: int, row: int) -> tuple[int, int]:
+        """Map a destination pixel corner ``(col, row)`` back to source pixels."""
+        inverse = ~self.transform
+        mapped = inverse @ (float(col), float(row))
+        return (round(mapped[0]), round(mapped[1]))
+
+    @property
+    def overlap(self) -> Window:
+        """The overlap window in the source raster (alias of ``overlap_a``)."""
+        return self.overlap_a
+
+    @property
+    def overlap_pixels(self) -> int:
+        """Number of pixels in the overlap; zero for edge or corner contact."""
+        return self.overlap_a.count
 
 
 def cos_sin_deg(deg: float) -> tuple[float, float]:
@@ -701,6 +865,305 @@ identity = Affine(1, 0, 0, 0, 1, 0)
 """The identity transform"""
 
 # Miscellaneous utilities
+
+
+def _checked_shape(shape: Sequence[int], name: str) -> tuple[int, int]:
+    """Return ``(rows, cols)`` from a raster shape."""
+    try:
+        rows, cols = shape
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a (rows, cols) pair") from None
+    if isinstance(rows, bool) or isinstance(cols, bool):
+        raise TypeError(f"{name} dimensions must be integers")
+    rows, cols = int(rows), int(cols)
+    if rows <= 0 or cols <= 0:
+        raise ValueError(f"{name} dimensions must be positive")
+    return rows, cols
+
+
+def _pixel_scale(transform: Affine) -> float:
+    """Return the shortest pixel edge length of a raster transform."""
+    return min(
+        math.hypot(transform.a, transform.d),
+        math.hypot(transform.b, transform.e),
+    )
+
+
+def _grid_deviation(
+    source: Affine,
+    destination: Affine,
+    inverse_destination: Affine,
+    mapping: Affine,
+    p: tuple[float, float],
+) -> float:
+    """Physical distance between one grid node under two raster transforms.
+
+    The comparison is carried out in destination pixel space to avoid
+    cancelling large world coordinates, then converted to world units with
+    the destination transform's linear part.
+    """
+    q = mapping @ p
+    source_pixel = inverse_destination @ (source @ p)
+    offset_col = source_pixel[0] - q[0]
+    offset_row = source_pixel[1] - q[1]
+    return math.hypot(
+        destination.a * offset_col + destination.b * offset_row,
+        destination.d * offset_col + destination.e * offset_row,
+    )
+
+
+def _corner_residuals(
+    source: Affine,
+    destination: Affine,
+    mapping: Affine,
+    source_shape: tuple[int, int],
+    destination_shape: tuple[int, int],
+) -> float:
+    """Maximum grid-node residual over both full raster extents.
+
+    The residual is the physical distance between the same grid node
+    expressed through both rasters.  Every residual component is affine in
+    pixel coordinates, so its worst magnitude over a rectangular extent is
+    attained at a corner.  Both extents are checked: a mapping that looks
+    fine at the source origin can drift arbitrarily far at a far corner.
+    """
+    source_rows, source_cols = source_shape
+    destination_rows, destination_cols = destination_shape
+    inverse_destination = ~destination
+    inverse_mapping = ~mapping
+
+    worst = 0.0
+    for col, row in (
+        (0.0, 0.0),
+        (float(source_cols), 0.0),
+        (0.0, float(source_rows)),
+        (float(source_cols), float(source_rows)),
+    ):
+        worst = max(
+            worst,
+            _grid_deviation(
+                source, destination, inverse_destination, mapping, (col, row)
+            ),
+        )
+
+    for col, row in (
+        (0.0, 0.0),
+        (float(destination_cols), 0.0),
+        (0.0, float(destination_rows)),
+        (float(destination_cols), float(destination_rows)),
+    ):
+        p = inverse_mapping @ (col, row)
+        worst = max(
+            worst,
+            _grid_deviation(source, destination, inverse_destination, mapping, p),
+        )
+    return worst
+
+
+def _rect_q_bounds(
+    mapping: Affine, shape: tuple[int, int]
+) -> tuple[int, int, int, int]:
+    """Bounds of a raster rectangle under an integer pixel mapping."""
+    rows, cols = shape
+    qs = [
+        mapping @ (float(col), float(row))
+        for col, row in ((0, 0), (cols, 0), (0, rows), (cols, rows))
+    ]
+    return (
+        round(min(q[0] for q in qs)),
+        round(max(q[0] for q in qs)),
+        round(min(q[1] for q in qs)),
+        round(max(q[1] for q in qs)),
+    )
+
+
+def _overlap_windows(
+    mapping: Affine,
+    source_shape: tuple[int, int],
+    destination_shape: tuple[int, int],
+) -> tuple[Window, Window]:
+    """Half-open overlap windows in source and destination pixel coordinates.
+
+    An overlap is an area intersection of pixel cells.  When the rasters
+    only share an edge or a corner the intersection has zero width or zero
+    height, and the returned windows contain no pixels.
+    """
+    source_q = _rect_q_bounds(mapping, source_shape)
+    dest_rows, dest_cols = destination_shape
+    col_start = max(source_q[0], 0)
+    col_stop = min(source_q[1], dest_cols)
+    row_start = max(source_q[2], 0)
+    row_stop = min(source_q[3], dest_rows)
+    if col_stop <= col_start or row_stop <= row_start:
+        empty = Window(0, 0, 0, 0)
+        return empty, empty
+
+    destination_window = Window(row_start, row_stop, col_start, col_stop)
+
+    inverse = ~mapping
+    source_ps = [
+        inverse @ (float(col), float(row))
+        for col, row in (
+            (col_start, row_start),
+            (col_stop, row_start),
+            (col_start, row_stop),
+            (col_stop, row_stop),
+        )
+    ]
+    src_col_start = round(min(p[0] for p in source_ps))
+    src_col_stop = round(max(p[0] for p in source_ps))
+    src_row_start = round(min(p[1] for p in source_ps))
+    src_row_stop = round(max(p[1] for p in source_ps))
+    src_rows, src_cols = source_shape
+    src_col_start = max(src_col_start, 0)
+    src_col_stop = min(src_col_stop, src_cols)
+    src_row_start = max(src_row_start, 0)
+    src_row_stop = min(src_row_stop, src_rows)
+    return (
+        Window(src_row_start, src_row_stop, src_col_start, src_col_stop),
+        destination_window,
+    )
+
+
+def align_grid(
+    transform_a: Affine,
+    shape_a: Sequence[int],
+    transform_b: Affine,
+    shape_b: Sequence[int],
+    *,
+    tolerance: float = DEFAULT_GRID_TOLERANCE,
+) -> GridAlignment:
+    """Align two raster grids by whole pixels, swapping and flipping axes.
+
+    The search is restricted to mappings of the form ``q = P @ p + t``
+    where ``P`` is a signed permutation matrix and ``t`` is an integer
+    translation in destination pixels.  Such a mapping changes axis order,
+    flips an axis, or translates by whole pixels, but never rotates by a
+    non-right angle, scales, or shears, so no resampling would be needed.
+
+    Candidate mappings are not accepted on coefficient similarity alone.
+    For every candidate, the Euclidean residual between the same grid node
+    represented through both rasters is evaluated at the corners of both
+    full extents.  A tiny pixel-size mismatch accumulates with distance and
+    is rejected when it makes any covered grid point deviate further than
+    the tolerance.
+
+    Parameters
+    ----------
+    transform_a, transform_b : Affine
+        Affine transforms from pixel corner coordinates to world
+        coordinates.
+    shape_a, shape_b : sequence of two ints
+        Raster shapes as ``(rows, cols)``.
+    tolerance : float, optional
+        Largest allowed grid-node discrepancy as a fraction of the shorter
+        pixel edge.  Defaults to one millionth of a pixel, which admits
+        floating-point round-off but not any genuine resampling.
+
+    Returns
+    -------
+    GridAlignment
+        The integer mapping, its worst-case deviation, and the half-open
+        overlap windows.  The windows are empty when the rasters only touch
+        along an edge or at a corner.
+
+    Raises
+    ------
+    GridAlignmentError
+        If no signed-permutation and whole-pixel translation aligns both
+        full extents within ``tolerance``.
+    ValueError
+        If a shape is not a positive ``(rows, cols)`` pair.
+    TransformNotInvertibleError
+        If either transform is degenerate.
+    """
+    if tolerance < 0:
+        raise ValueError("tolerance must be non-negative")
+    source_rows, source_cols = _checked_shape(shape_a, "shape_a")
+    destination_rows, destination_cols = _checked_shape(shape_b, "shape_b")
+    source_shape = (source_rows, source_cols)
+    destination_shape = (destination_rows, destination_cols)
+
+    if transform_a.is_degenerate:
+        raise TransformNotInvertibleError("source transform is degenerate")
+    if transform_b.is_degenerate:
+        raise TransformNotInvertibleError("destination transform is degenerate")
+
+    pixel_scale = min(_pixel_scale(transform_a), _pixel_scale(transform_b))
+    if pixel_scale == 0.0:
+        raise TransformNotInvertibleError("pixel edge has zero length")
+    allowed_deviation = tolerance * pixel_scale
+
+    # The source origin maps to this pixel coordinate in the destination
+    # grid.  Candidate whole-pixel offsets are seeded from several reference
+    # points of the source extent under every candidate permutation; taking
+    # both floor and ceiling means floating-point round-off near an integer
+    # cannot hide the true offset.
+    offset_candidates: set[tuple[int, int]] = set()
+    reference_points = (
+        (0, 0),
+        (source_cols / 2.0, source_rows / 2.0),
+        (float(source_cols), 0),
+        (0, float(source_rows)),
+        (float(source_cols), float(source_rows)),
+    )
+    for pa, pb, pd, pe in _GRID_PERMUTATIONS:
+        basis = Affine(float(pa), float(pb), 0.0, float(pd), float(pe), 0.0)
+        for col, row in reference_points:
+            world = transform_a @ (col, row)
+            pixel = ~transform_b @ world
+            seed = basis @ (col, row)
+            for candidate_col in (math.floor(pixel[0]), math.ceil(pixel[0])):
+                for candidate_row in (math.floor(pixel[1]), math.ceil(pixel[1])):
+                    offset_candidates.add(
+                        (
+                            round(candidate_col - seed[0]),
+                            round(candidate_row - seed[1]),
+                        )
+                    )
+
+    best: GridAlignment | None = None
+    best_worst = math.inf
+    for pa, pb, pd, pe in _GRID_PERMUTATIONS:
+        for offset_col, offset_row in offset_candidates:
+            mapping = Affine(
+                float(pa),
+                float(pb),
+                float(offset_col),
+                float(pd),
+                float(pe),
+                float(offset_row),
+            )
+            worst = _corner_residuals(
+                transform_a,
+                transform_b,
+                mapping,
+                source_shape,
+                destination_shape,
+            )
+            if worst < best_worst:
+                overlap_a, overlap_b = _overlap_windows(
+                    mapping, source_shape, destination_shape
+                )
+                best_worst = worst
+                best = GridAlignment(
+                    column_mapping=(pa, pb, offset_col),
+                    row_mapping=(pd, pe, offset_row),
+                    transform=mapping,
+                    worst_case_deviation=worst,
+                    worst_case_deviation_pixels=worst / pixel_scale,
+                    tolerance=tolerance,
+                    overlap_a=overlap_a,
+                    overlap_b=overlap_b,
+                )
+
+    if best is None or best_worst > allowed_deviation:
+        raise GridAlignmentError(
+            "no whole-pixel grid alignment within tolerance "
+            f"{tolerance} px (best worst-case deviation "
+            f"{(best_worst / pixel_scale) if best else math.inf:.6g} px)"
+        )
+    return best
 
 
 def loadsw(s: str) -> Affine:

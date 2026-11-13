@@ -104,3 +104,41 @@ The reverse transformation is obtained using the ``~`` inverse operator.
   >>> rev = ~fwd
   >>> rev @ fwd @ (col, row)
   (0.0, 99.99999999999999)
+
+Grid alignment
+--------------
+
+Two rasters may share a nominal resolution yet still sit on different
+pixel grids because of small rotations, swapped axes, flips, or origins
+offset by a fraction of a pixel.  ``align_grid()`` decides whether one
+grid can be mapped onto the other by whole pixels only, so that no
+resampling is needed.
+
+.. code-block:: pycon
+
+  >>> from affine import align_grid
+  >>> a = Affine(10, 0, 1000, 0, -10, 2000)
+  >>> b = Affine(10, 0, 1030, 0, -10, 1980)
+  >>> alignment = align_grid(a, (10, 10), b, (10, 10))
+  >>> alignment.column_mapping
+  (1, 0, -3)
+  >>> alignment.overlap_a.shape
+  (8, 7)
+
+Only signed permutations of the pixel axes plus an integer translation are
+considered, covering axis swaps and flips as well as whole-pixel shifts.
+Candidates are rejected on the worst-case grid node deviation measured
+over the corners of both full extents, not on the size of the coefficient
+differences: a one-part-per-million pixel size mismatch can accumulate
+into a full pixel of drift across a large scene.
+
+``GridAlignment.overlap_a`` and ``overlap_b`` are half-open row/column
+windows.  Rasters that touch only along an edge or at a corner report an
+empty window and zero overlap pixels.
+
+.. code-block:: pycon
+
+  >>> a = Affine(10, 0, 0, 0, -10, 100)
+  >>> b = Affine(10, 0, 100, 0, -10, 100)
+  >>> align_grid(a, (10, 10), b, (10, 10)).overlap_pixels
+  0
