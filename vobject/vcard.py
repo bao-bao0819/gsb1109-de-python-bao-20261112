@@ -386,3 +386,22 @@ class OrgBehavior(VCardBehavior):
 
 
 registerBehavior(OrgBehavior, "ORG")
+
+
+def merge_vcards(base, left, right, **options):
+    """
+    Merge two vCard exports relative to C{base}, keeping item groups paired.
+
+    This is a convenience re-export of L{vobject.vcard_merge.merge_vcards}.
+    See that module for the meaning of C{choices}, C{resolver} and C{strict}.
+    """
+    from .vcard_merge import merge_vcards as _merge_vcards
+
+    return _merge_vcards(base, left, right, **options)
+
+
+def merge_vcards_with_report(base, left, right, **options):
+    """Re-export of L{vobject.vcard_merge.merge_vcards_with_report}."""
+    from .vcard_merge import merge_vcards_with_report as _merge_with_report
+
+    return _merge_with_report(base, left, right, **options)

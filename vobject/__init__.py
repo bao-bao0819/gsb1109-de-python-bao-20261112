@@ -76,8 +76,20 @@ VObject Overview
 
 """
 
-from . import icalendar, vcard
+from . import icalendar, vcard, vcard_merge
 from .base import newFromBehavior, readComponents, readOne
+from .vcard_merge import (
+    AmbiguousGroupError,
+    GroupAmbiguity,
+    MergeConflict,
+    MergeReport,
+    VCardMergeError,
+    merge_vcard,
+    merge_vcards,
+    merge_vcards_report,
+    merge_vcards_with_report,
+    three_way_merge,
+)
 
 # Package version
 VERSION = "1.0.0"

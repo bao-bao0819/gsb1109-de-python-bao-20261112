@@ -311,3 +311,54 @@ vCards objects.
 >>> vobject.readComponents(vCardStream).next().email.value
 'jeffrey@osafoundation.org'
 ```
+
+#### Merging two exports of one contact
+
+vCard `itemN` groups associate an extra property (for example `X-ABLabel`)
+ with the property before it. The group prefix is just a local identifier, so
+two exports of the same contact may use different numbers for the same pair.
+`merge_vcards` performs a three-way merge that keeps a marked property with
+its group companions:
+
+```
+>>> base = """BEGIN:VCARD
+... VERSION:3.0
+... FN:Alice
+... item1.TEL;TYPE=CELL:+1-555-0100
+... item1.X-ABLabel:mobile
+... item2.TEL;TYPE=WORK:+1-555-0200
+... item2.X-ABLabel:office
+... END:VCARD
+... """
+>>> left = base.replace("item1.X-ABLabel:mobile", "item1.X-ABLabel:personal")
+>>> right = """BEGIN:VCARD
+... VERSION:3.0
+... FN:Alice
+... item2.TEL;TYPE=CELL:+1-555-0100
+... item2.X-ABLabel:mobile
+... item1.TEL;TYPE=WORK:+1-555-0300
+... item1.X-ABLabel:office
+... END:VCARD
+... """
+>>> merged = vobject.merge_vcards(base, left, right)
+>>> print(merged.serialize())  # item1's label change stays with +1-555-0100
+BEGIN:VCARD
+VERSION:3.0
+FN:Alice
+item1.TEL;TYPE=CELL:+1-555-0100
+item2.TEL;TYPE=WORK:+1-555-0300
+item1.X-ABLABEL:personal
+item2.X-ABLABEL:office
+END:VCARD
+```
+
+Groups are paired through unchanged properties: a changed label is found
+by its unchanged number and a changed number by its unchanged label. Two
+base groups with identical contents provide no such evidence; that optional
+correspondence is returned by `merge_vcards_with_report` as a
+`GroupAmbiguity`, and can be decided with a `choices` mapping or a
+`resolver` callback. With `strict=True` an unresolved ambiguity raises
+`AmbiguousGroupError`.
+
+The same merge is available from the command line as
+`vcard_merge BASE LEFT RIGHT`.
