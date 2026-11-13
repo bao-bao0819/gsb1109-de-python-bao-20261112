@@ -9,6 +9,7 @@ __url__ = "https://github.com/c0fec0de/anytree"
 from . import cachedsearch, util
 from .iterators import LevelOrderGroupIter, LevelOrderIter, PostOrderIter, PreOrderIter, ZigZagGroupIter
 from .node import AnyNode, LightNodeMixin, LoopError, Node, NodeMixin, SymlinkNode, SymlinkNodeMixin, TreeError
+from .partition import PartitionResult, plan_partition
 from .render import AbstractStyle, AsciiStyle, ContRoundStyle, ContStyle, DoubleStyle, RenderTree
 from .resolver import ChildResolverError, Resolver, ResolverError, RootResolverError
 from .search import CountError, find, find_by_attr, findall, findall_by_attr
@@ -34,6 +35,7 @@ __all__ = [
     "LoopError",
     "Node",
     "NodeMixin",
+    "PartitionResult",
     "PostOrderIter",
     "PreOrderIter",
     "RenderTree",
@@ -51,5 +53,6 @@ __all__ = [
     "find_by_attr",
     "findall",
     "findall_by_attr",
+    "plan_partition",
     "util",
 ]
