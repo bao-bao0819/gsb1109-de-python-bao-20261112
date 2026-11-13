@@ -10,5 +10,6 @@ API
     api/anytree.search
     api/anytree.cachedsearch
     api/anytree.resolver
+    api/anytree.legacyresolve
     api/anytree.walker
     api/anytree.util
