@@ -46,6 +46,7 @@ Feel free to share_ info about your anytree project.
    api
    importer
    exporter
+   pagination
    tricks
 
 

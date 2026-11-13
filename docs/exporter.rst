@@ -13,6 +13,7 @@ Available exporters:
     exporter/jsonexporter
     exporter/dotexporter
     exporter/mermaidexporter
+    exporter/pagedexporter
 
 Exporter missing? File a request here: Issues_.
 
