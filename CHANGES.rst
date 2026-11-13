@@ -4,6 +4,16 @@ Change Log
 Unreleased
 ----------
 
+Adds:
+
+- Adds the ``uncertainties.persistence`` module for storing measurements in
+  separately written and read partitions while preserving the identity of
+  shared independent variables across partitions through a
+  ``VariableRegistry``. Shared error sources (such as a common calibration
+  bias) stay correlated after reading the partitions back and cancel out in
+  differences; variables that merely share a tag remain independent, and each
+  partition remains readable on its own with its marginal uncertainties.
+
 Changes:
 
 - Updates test configuration to run against python versions `3.11` through `3.15`. Previously tests ran against python

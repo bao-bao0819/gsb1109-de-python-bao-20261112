@@ -88,6 +88,64 @@ which shows that the original variable :data:`x` and the new variable :data:`x2`
 are completely uncorrelated.
 
 
+.. index:: partitioned persistence
+.. index:: saving to file; partitioned measurements
+
+.. _partitioned_persistence:
+
+Partitioned persistence of shared error sources
+------------------------------------------------
+
+Regular pickling preserves correlations only *inside* each pickle blob.
+Measurements of the same experiment are often stored in separate partitions
+(one file per day, per instrument, ...): reading these partitions back with
+:func:`pickle.load` would produce unrelated variables, so an error source
+shared between partitions (a common calibration bias, for instance) could no
+longer cancel out in differences.
+
+The :mod:`uncertainties.persistence` module writes and reads such partitions
+while keeping a persistent identity for each independent variable.  A
+:class:`~uncertainties.persistence.VariableRegistry` shared between the
+partitions maps each variable to a key stored in the partitions:
+
+>>> import io
+>>> from uncertainties import ufloat
+>>> from uncertainties.persistence import (
+...     VariableRegistry, write_partition, read_partition)
+>>> calibration_bias = ufloat(0, 0.1, tag="calibration")
+>>> instrument_a = 1.0 + calibration_bias + ufloat(0, 0.05)
+>>> instrument_b = 2.0 + calibration_bias + ufloat(0, 0.07)
+>>> write_registry = VariableRegistry()
+>>> partition_a = io.BytesIO()
+>>> write_partition(instrument_a, partition_a, registry=write_registry)
+>>> partition_b = io.BytesIO()
+>>> write_partition(instrument_b, partition_b, registry=write_registry)
+
+The reading program does not need the writing registry: the keys travel with
+the partitions.  Reading both partitions with one fresh registry reconnects
+the shared calibration bias, so it cancels out in the difference:
+
+>>> read_registry = VariableRegistry()
+>>> a = read_partition(io.BytesIO(partition_a.getvalue()),
+...                    registry=read_registry)
+>>> b = read_partition(io.BytesIO(partition_b.getvalue()),
+...                    registry=read_registry)
+>>> a - b
+-1.0+/-0.08602325267042628
+
+Only the two independent noise terms remain (the standard deviation of the
+difference is :math:`\\sqrt{0.05^2 + 0.07^2}`); the shared calibration
+variance drops out.  The order in which the partitions are read does not
+change the result, and reading any partition on its own still restores its
+marginal uncertainty:
+
+>>> read_partition(io.BytesIO(partition_a.getvalue())).std_dev
+0.1118033988749895
+
+The identity is carried by the internally generated key, never by the tag:
+two distinct variables that happen to use the same tag are kept independent.
+
+
 .. index:: comparison operators; technical details
 
 .. _comparison_operators:
