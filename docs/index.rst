@@ -94,6 +94,56 @@ Rate Limiter
 
    .. automethod:: __init__
 
+Offline Address Migration
++++++++++++++++++++++++++
+
+When the address source is replaced, rows stored under the old schema --
+each keeping both the parsed :class:`geopy.location.Location` fields and
+part of the raw response -- must be replayed into the new schema without
+any network calls. :mod:`geopy.extra.address_migration` provides an
+offline, idempotent migrator for that. The caller declares the field
+mappings between the two response versions and the administrative
+hierarchy (with the unit of every level); the migrator only splits a
+display line that packs several levels when the raw evidence yields a
+unique decomposition, reports the missing fields of rows that cannot be
+replayed, and never merges sites that share a display name but belong to
+different levels. Repeated migrations keep the source identity observed
+on the first run.
+
+.. automodule:: geopy.extra.address_migration
+   :members: __doc__
+
+.. autoclass:: geopy.extra.address_migration.FieldMapping
+
+   .. automethod:: __init__
+
+.. autoclass:: geopy.extra.address_migration.LevelSpec
+
+   .. automethod:: __init__
+
+.. autoclass:: geopy.extra.address_migration.SourceSpec
+
+   .. automethod:: __init__
+
+.. autoclass:: geopy.extra.address_migration.TargetSpec
+
+   .. automethod:: __init__
+
+.. autoclass:: geopy.extra.address_migration.MigratedRecord
+
+   .. automethod:: __init__
+
+.. autoclass:: geopy.extra.address_migration.SkippedRow
+
+.. autoclass:: geopy.extra.address_migration.MigrationReport
+
+.. autoclass:: geopy.extra.address_migration.AddressMigrator
+
+   .. automethod:: __init__
+   .. automethod:: migrate
+   .. automethod:: state_dict
+   .. automethod:: load_state
+
 ArcGIS
 ------
 
