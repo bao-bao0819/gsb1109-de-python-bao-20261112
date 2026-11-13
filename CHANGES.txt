@@ -1,6 +1,19 @@
 CHANGES
 =======
 
+Unreleased
+----------
+
+New features:
+
+- Added ``reproject_group_migrations()`` and the ``GroupMigration`` data
+  class. Given old and new source-to-target transforms, a fixed target
+  grid, and a source window, the function returns the maximal contiguous
+  source column runs per row whose target grid group changes, including
+  runs moving into or out of the target extent. Runs are cut only at
+  grid-line crossings, so wide source windows are handled without
+  per-pixel iteration.
+
 3.0.1 (2026-08-28)
 ------------------
 

@@ -35,6 +35,7 @@ copyright statement below.
 from __future__ import annotations
 
 from collections.abc import MutableSequence, Sequence
+from dataclasses import dataclass
 from functools import cached_property
 import math
 from typing import overload
@@ -42,7 +43,7 @@ import warnings
 
 from attrs import astuple, define, field
 
-__all__ = ["Affine"]
+__all__ = ["Affine", "GroupMigration", "reproject_group_migrations"]
 __author__ = "Sean Gillies"
 __version__ = "3.0.1"
 
@@ -771,3 +772,212 @@ def set_epsilon(epsilon: float) -> None:
 
 
 set_epsilon(1e-5)
+
+
+@dataclass(frozen=True)
+class GroupMigration:
+    """A contiguous run of source pixels in one row that changes group.
+
+    All pixels in the half-open column range ``[col_start, col_end)`` of
+    source row ``row`` map to the same target grid cell under both the
+    old and the new transform, but that cell differs between the two
+    transforms.
+
+    Attributes
+    ----------
+    row : int
+        Source row of the migrated pixels.
+    col_start, col_end : int
+        Half-open source column range of the run.
+    old_group : tuple[int, int] | None
+        Target ``(column, row)`` under the old transform. ``None`` marks
+        pixels whose old position falls outside the target grid.
+    new_group : tuple[int, int] | None
+        Target ``(column, row)`` under the new transform. ``None`` marks
+        pixels whose new position falls outside the target grid.
+    """
+
+    row: int
+    col_start: int
+    col_end: int
+    old_group: tuple[int, int] | None
+    new_group: tuple[int, int] | None
+
+
+def _column_group(
+    composed: Affine,
+    row: int,
+    col: int,
+    width: int,
+    height: int,
+) -> tuple[int, int] | None:
+    """Return the target grid group for one source pixel center.
+
+    ``composed`` maps source pixel coordinates to target pixel
+    coordinates, so integer crossings of its two components are exactly
+    the target grid lines, even for rotated target grids.
+    """
+    u, v = composed @ (col + 0.5, row + 0.5)
+    target_col = math.floor(u)
+    target_row = math.floor(v)
+    if 0 <= target_col < width and 0 <= target_row < height:
+        return target_col, target_row
+    return None
+
+
+def _crossing_columns(
+    slope: float, intercept: float, col_start: int, col_end: int
+) -> list[float]:
+    """Columns where ``slope * (col + 0.5) + intercept`` crosses an integer.
+
+    Only crossings strictly inside the open column interval
+    ``(col_start, col_end)`` are returned. The cost is proportional to
+    the number of integer grid lines actually crossed.
+    """
+    if slope == 0.0:
+        return []
+    value_start = slope * (col_start + 0.5) + intercept
+    value_end = slope * (col_end + 0.5) + intercept
+    low = min(value_start, value_end)
+    high = max(value_start, value_end)
+    first_k = math.floor(low) + 1
+    last_k = math.ceil(high) - 1
+    return [(k - intercept) / slope - 0.5 for k in range(first_k, last_k + 1)]
+
+
+def _transform_boundaries(
+    composed: Affine, row: int, col_start: int, col_end: int
+) -> list[float]:
+    """Group-boundary column coordinates for one composed transform.
+
+    At a fixed source row, varying the column drives both target
+    coordinates through the transform's ``a`` and ``d`` coefficients.
+    """
+    pa, pb, pc, pd, pe, pf = composed[:6]
+    row_center = row + 0.5
+    intercept_u = pb * row_center + pc
+    intercept_v = pe * row_center + pf
+    boundaries = _crossing_columns(pa, intercept_u, col_start, col_end)
+    boundaries.extend(_crossing_columns(pd, intercept_v, col_start, col_end))
+    return boundaries
+
+
+def _merged_boundaries(
+    old_composed: Affine,
+    new_composed: Affine,
+    row: int,
+    col_start: int,
+    col_end: int,
+) -> list[int]:
+    """Union of both transforms' group boundaries as integer cuts.
+
+    Each returned integer is a source column where at least one of the
+    transforms changes target group. The list is sorted and unique and
+    lies inside ``[col_start, col_end]``.
+    """
+    raw = _transform_boundaries(old_composed, row, col_start, col_end)
+    raw.extend(_transform_boundaries(new_composed, row, col_start, col_end))
+    cuts = {col_start, col_end}
+    for boundary in raw:
+        cut = math.ceil(boundary - EPSILON)
+        if col_start < cut < col_end:
+            cuts.add(cut)
+    return sorted(cuts)
+
+
+def reproject_group_migrations(
+    old_transform: Affine,
+    new_transform: Affine,
+    target_transform: Affine,
+    target_width: int,
+    target_height: int,
+    source_window: tuple[int, int, int, int],
+) -> list[GroupMigration]:
+    """Find contiguous source column runs whose target grid group changes.
+
+    Source pixel centers are mapped through ``old_transform`` and
+    ``new_transform`` and snapped to the integer column and row of the
+    fixed target raster described by ``target_transform``. Positions
+    outside the target grid form their own group, represented by
+    ``None``.
+
+    Only pixels whose group differs between the two transforms are
+    returned. Within each source row, such pixels are coalesced into the
+    maximal contiguous column runs over which both groups are constant.
+
+    Parameters
+    ----------
+    old_transform, new_transform : Affine
+        Transform from source pixel coordinates to target coordinates
+        before and after the registration revision.
+    target_transform : Affine
+        Corner-based transform of the fixed target grid.
+    target_width, target_height : int
+        Shape of the target grid in pixels.
+    source_window : tuple of int
+        ``(row_start, col_start, row_end, col_end)`` half-open source
+        pixel window to inspect.
+
+    Returns
+    -------
+    list of GroupMigration
+        One entry per contiguous run of changed pixels, ordered by
+        source row then source column. Rows without changes produce no
+        entries.
+
+    Notes
+    -----
+    Runs are cut only at column coordinates where a composed transform
+    actually crosses a target grid line, so a very wide source window
+    with few boundaries costs work proportional to the number of
+    boundaries, not to the number of pixels.
+    """
+    row_start, col_start, row_end, col_end = source_window
+    if not (row_start <= row_end and col_start <= col_end):
+        raise ValueError("source_window bounds must be ordered and half-open")
+    if target_width <= 0 or target_height <= 0:
+        raise ValueError("target grid dimensions must be positive")
+    if target_transform.is_degenerate:
+        raise TransformNotInvertibleError("Cannot invert degenerate target transform")
+    if old_transform == new_transform:
+        return []
+
+    inv_target = ~target_transform
+    old_composed = inv_target @ old_transform
+    new_composed = inv_target @ new_transform
+    migrations: list[GroupMigration] = []
+
+    for row in range(row_start, row_end):
+        cuts = _merged_boundaries(old_composed, new_composed, row, col_start, col_end)
+        for seg_start, seg_end in zip(cuts, cuts[1:]):
+            old_group = _column_group(
+                old_composed, row, seg_start, target_width, target_height
+            )
+            new_group = _column_group(
+                new_composed, row, seg_start, target_width, target_height
+            )
+            if old_group == new_group:
+                continue
+            if (
+                migrations
+                and migrations[-1].row == row
+                and migrations[-1].col_end == seg_start
+                and migrations[-1].old_group == old_group
+                and migrations[-1].new_group == new_group
+            ):
+                previous = migrations.pop()
+                migrations.append(
+                    GroupMigration(
+                        row,
+                        previous.col_start,
+                        seg_end,
+                        old_group,
+                        new_group,
+                    )
+                )
+            else:
+                migrations.append(
+                    GroupMigration(row, seg_start, seg_end, old_group, new_group)
+                )
+
+    return migrations
