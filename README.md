@@ -42,6 +42,7 @@ In particular, it provides the following features:
       * [Import & export intervals to strings](#import--export-intervals-to-strings)
       * [Import & export intervals to Python built-in data types](#import--export-intervals-to-python-built-in-data-types)
       * [Specialize & customize intervals](#specialize--customize-intervals)
+      * [Temporal records on integer events](#temporal-records-on-integer-events)
   * [Changelog](#changelog)
   * [Contributions](#contributions)
   * [License](#license)
@@ -952,6 +953,136 @@ True
 ```
 
 
+
+[&uparrow; back to top](#table-of-contents)
+## Temporal records on integer events
+
+The `portion.temporal` module (also exported at the top level) solves a small
+but common temporal problem: events from different devices are only known to
+occur within sets of possible integer times, with excluded ranges in between
+(such as power outages), and a collection of records relates some of them.
+Three kinds of records are supported:
+
+ - `P.before(a, b)`: `a` happens no later than `b`;
+ - `P.min_gap(a, b, d)`: `b` happens at least `d` time units after `a`;
+ - `P.max_wait(a, b, d)`: `b` happens at most `d` time units after `a`.
+
+Admissible times are ordinary interval sets, so disconnected windows stay
+disconnected and the excluded gaps are never treated as usable continuous time.
+Use `P.make_domain` to declare them with closed integer ranges or singletons:
+
+```python
+>>> domains = {
+...     'a': P.make_domain((1, 2), (6, 8)),  # times 3, 4, 5 are excluded
+...     'b': P.make_domain((2, 3), (7, 9)),
+... }
+>>> model = P.TemporalModel(domains, [P.min_gap('a', 'b', 2)])
+
+```
+
+`TemporalModel.solve` propagates every record and returns the reduced
+admissible times. Gaps are preserved, and only genuinely admissible integers
+survive:
+
+```python
+>>> model.solve()['a']
+[1,2] | [6,7]
+>>> model.solve()['b']
+[3] | [7,9]
+
+```
+
+`feasible_schedule` exhibits one concrete integer time per event. Both an
+earliest and a latest schedule can be requested, and every returned value
+belongs to the original admissible set rather than to an excluded gap:
+
+```python
+>>> model.feasible_schedule()
+{'a': 1, 'b': 3}
+>>> model.feasible_schedule('latest')
+{'a': 7, 'b': 9}
+
+```
+
+The central question for a pair of events is answered by `order_of`. It returns
+one of four verdicts — `necessary`, `reversible`, `simultaneous` or
+`infeasible` — together with schedules supporting the conclusion. A reversible
+pair comes with both a schedule where the first event is strictly earlier and
+one where it is strictly later:
+
+```python
+>>> free = P.TemporalModel({
+...     'a': P.make_domain((1, 5)),
+...     'b': P.make_domain((1, 5)),
+... })
+>>> result = free.order_of('a', 'b')
+>>> result.verdict
+'reversible'
+>>> result.schedule            # a strictly before b
+{'a': 1, 'b': 2}
+>>> result.reverse_schedule    # b strictly before a
+{'b': 4, 'a': 5}
+
+```
+
+When the order cannot change, the verdict becomes `necessary` (with the event
+that must happen first) or `simultaneous` when the records force a common time:
+
+```python
+>>> model.order_of('a', 'b').verdict
+'necessary'
+>>> model.order_of('a', 'b').earlier
+'a'
+>>> tied = P.TemporalModel(
+...     {'a': P.make_domain((1, 5)), 'b': P.make_domain((1, 5))},
+...     [P.before('a', 'b'), P.before('b', 'a')],
+... )
+>>> tied.order_of('a', 'b').verdict
+'simultaneous'
+
+```
+
+If the whole set of records has no solution, `order_of` reports `infeasible`
+and `conflicts` points at the incompatible records. A conflict is either a
+strict ordering cycle, a numeric contradiction, or an event forced entirely
+into an excluded gap:
+
+```python
+>>> cyclic = P.TemporalModel(
+...     {'a': P.make_domain((1, 4)), 'b': P.make_domain((1, 4))},
+...     [P.min_gap('a', 'b', 1), P.min_gap('b', 'a', 1)],
+... )
+>>> cyclic.order_of('a', 'b').verdict
+'infeasible'
+>>> cyclic.conflicts()[0]['kind']
+'cycle'
+>>> cyclic.conflicts()[0]['events']
+['a', 'b', 'a']
+
+>>> gap = P.TemporalModel(
+...     {'a': P.make_domain(1, 10), 'b': P.make_domain(5)},
+...     [P.max_wait('a', 'b', 2), P.before('a', 'b')],
+... )
+>>> gap.is_consistent()
+False
+>>> gap.conflicts()[0]['kind']
+'excluded_gap'
+
+```
+
+Finally, `components` exposes the groups of events actually linked by records.
+Events in different components are scheduled independently, so their separate
+possible-time windows are never merged into one continuous timeline:
+
+```python
+>>> independent = P.TemporalModel(
+...     {'a': P.make_domain(1), 'b': P.make_domain(8), 'c': P.make_domain(2)},
+...     [P.before('a', 'b')],
+... )
+>>> sorted(map(sorted, independent.components()))
+[['a', 'b'], ['c']]
+
+```
 
 [&uparrow; back to top](#table-of-contents)
 ## Changelog

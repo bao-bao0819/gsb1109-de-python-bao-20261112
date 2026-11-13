@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+ - `portion.temporal`: a solver for integer-time events whose admissible times are (possibly disconnected) interval sets, supporting precedence, minimum-gap and maximum-wait records. It classifies the relative order of an event pair as necessary, reversible, simultaneous or infeasible, returns supporting feasible schedules, and explains inconsistent records (strict ordering cycles, numeric contradictions and times forced into excluded gaps).
+
+
+
 ## 2.6.3 (2026-09-29)
 
 ### Fixed
