@@ -7,6 +7,7 @@ from .const import Bound, inf
 from .dict import IntervalDict
 from .func import closed, closedopen, empty, iterate, open, openclosed, singleton
 from .io import from_data, from_string, to_data, to_string
+from .stats import KthSmallestCheck, check_kth_smallest, kth_smallest_values
 
 __all__ = ["create_api"]
 
@@ -61,6 +62,9 @@ def create_api(interval, *, interval_dict=None, name=None):
         "from_data": partial(from_data, klass=interval),
         "to_data": to_data,
         "IntervalDict": interval_dict,
+        "kth_smallest_values": kth_smallest_values,
+        "check_kth_smallest": check_kth_smallest,
+        "KthSmallestCheck": KthSmallestCheck,
     }
 
     module = importlib.util.module_from_spec(

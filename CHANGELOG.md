@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+ - `kth_smallest_values` computes the set of all the possible values of the k-th smallest reading of interval-valued observations with positive integer frequencies (open bounds, infinite bounds and internal holes are preserved).
+ - `check_kth_smallest` checks whether a candidate value can be the k-th smallest reading, returning witnessing readings when it is reachable, and an explanation of why all the feasible combinations of readings skip that rank otherwise.
+
+
 ## 2.6.3 (2026-09-29)
 
 ### Fixed

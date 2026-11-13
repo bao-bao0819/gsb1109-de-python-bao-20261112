@@ -38,6 +38,7 @@ In particular, it provides the following features:
       * [Comparison operators](#comparison-operators)
       * [Interval transformation](#interval-transformation)
       * [Discrete iteration](#discrete-iteration)
+      * [Order statistics of uncertain readings](#order-statistics-of-uncertain-readings)
       * [Map intervals to data](#map-intervals-to-data)
       * [Import & export intervals to strings](#import--export-intervals-to-strings)
       * [Import & export intervals to Python built-in data types](#import--export-intervals-to-python-built-in-data-types)
@@ -561,6 +562,46 @@ This callable will be called with the current value, and is expected to return t
 >>> # Since we reversed the order, we changed "+" to "-" in the lambda.
 >>> list(P.iterate(P.closed('a', 'd'), step=lambda d: chr(ord(d) - 1), reverse=True))
 ['d', 'c', 'b', 'a']
+
+```
+
+
+
+[&uparrow; back to top](#table-of-contents)
+### Order statistics of uncertain readings
+
+When the exact reading of an observation is unknown but confined to an interval (e.g. "below the detection limit" or "within one of two ranges"), `kth_smallest_values` computes the set of all the values the k-th smallest reading can take. Each observation is an `(interval, frequency)` pair with a positive integer frequency. The unknown reading of an observation is repeated as a whole by its frequency: a frequency cannot be split across several values.
+
+```python
+>>> # One reading below the detection limit of 5, and one reading of 7.
+>>> P.kth_smallest_values([(P.open(-P.inf, 5), 1), (P.singleton(7), 1)], k=1)
+(-inf,5)
+
+```
+
+The result preserves open bounds and internal holes. In particular, a hole can arise when the frequency of an observation straddling a value cannot be split between both sides of that value:
+
+```python
+>>> observations = [(P.singleton(0), 1), (P.closed(0, 1) | P.closed(9, 10), 2), (P.singleton(5), 1)]
+>>> P.kth_smallest_values(observations, k=3)
+[0,1] | [9,10]
+
+```
+
+`check_kth_smallest` tests a single candidate value. It returns the original readings that witness the result when the value is reachable, and explains why all the feasible combinations of readings skip that rank otherwise:
+
+```python
+>>> check = P.check_kth_smallest(observations, k=3, value=0.5)
+>>> check.reachable
+True
+>>> check.readings  # one reading per observation, repeated by its frequency
+(0, 0.5, 5)
+>>> check = P.check_kth_smallest(observations, k=3, value=5)
+>>> check.reachable
+False
+>>> print(check.reason)
+the frequencies [2] of the observations straddling 5 cannot be split between values below and above 5: the number of readings below 5 can only be [1, 3], while rank 3 requires it to be between 2 and 2, so every feasible combination of readings skips rank 3.
+
 
 ```
 
