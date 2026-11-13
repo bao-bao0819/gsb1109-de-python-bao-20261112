@@ -16,6 +16,7 @@ import functools
 import io
 import itertools
 import logging
+import math
 import os
 import sys
 import tempfile
@@ -137,6 +138,19 @@ class BBox(NamedTuple):
 
 class RingSamplingError(Exception):
     """An exception for geometric errors occurring when organising polygons."""
+
+
+class SimplificationError(Exception):
+    """Base class for errors raised while simplifying a geometry."""
+
+
+class DegeneratePartError(SimplificationError):
+    """Raised when a part cannot be simplified (e.g. it has fewer than two
+    distinct points, so no replacement segment can be built along it)."""
+
+
+class ToleranceError(SimplificationError):
+    """Raised when per-point simplification tolerances are missing or invalid."""
 
 
 class GeoJSON_Error(Exception):
@@ -1136,6 +1150,456 @@ def organize_polygon_rings(
     return polys
 
 
+# ---------------------------------------------------------------------------
+# Line / ring simplification (minimum vertex subsequence)
+#
+# Given per-point permitted offsets, find the smallest subsequence of the
+# original vertices such that every omitted point:
+#   * lies no farther from its replacement edge than its own tolerance, and
+#   * projects onto that replacement edge in original order (no backtracking),
+# while confluence points, part boundaries and explicitly marked sample
+# points are always retained.  Every original vertex is mapped to the
+# replacement edge and the position along it where it is represented.
+# ---------------------------------------------------------------------------
+
+# Floating-point slack used when comparing distances and projections.
+_SIMPLIFY_EPS = 1e-12
+
+
+class VertexMapping(NamedTuple):
+    """Where one original vertex is represented after simplification.
+
+    new_edge: zero-based index of the replacement edge in the simplified
+        part whose endpoints bracket the original vertex.
+    new_position: index of the replacement edge's start vertex in the
+        simplified part's point list.
+    distance: perpendicular distance of the original vertex from the
+        replacement edge (0.0 for retained vertices).
+    t: projection parameter of the vertex along the replacement edge,
+        measured from its start; 0.0 at the start and 1.0 at the end.
+        The projected point is therefore
+        ``new_points[new_position] + t * (new_points[new_position + 1] - ...)``.
+    """
+
+    new_edge: int
+    new_position: int
+    distance: float
+    t: float
+
+
+class SimplifiedLines(NamedTuple):
+    """Result of simplifying a collection of line parts."""
+
+    lines: list[PointsT]
+    mappings: list[list[VertexMapping]]
+    kept: list[list[int]]
+
+
+class SimplifiedShape(NamedTuple):
+    """Result of simplifying a polyline, polygon ring set or multipatch.
+
+    shape: a new Shape of the same shape type holding the retained vertices.
+    mappings: per-part old-to-new VertexMapping for every original vertex.
+    kept: per-part local indices of the retained vertices.
+    """
+
+    shape: Shape
+    mappings: list[list[VertexMapping]]
+    kept: list[list[int]]
+
+
+def _point_xy(point: PointT) -> Point2D:
+    return point[0], point[1]
+
+
+def _perpendicular_distance(
+    point: Point2D, start: Point2D, end: Point2D
+) -> tuple[float, float]:
+    """Return the (distance, projection parameter t) of point from the finite
+    segment start->end. t is clamped to [0.0, 1.0] so a point beyond either
+    endpoint is measured from that endpoint rather than the infinite line."""
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length_sq = dx * dx + dy * dy
+    if length_sq <= 0.0:
+        # Degenerate edge with identical endpoints: fall back to point distance.
+        return math.hypot(point[0] - start[0], point[1] - start[1]), 0.0
+    t = ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / length_sq
+    t = min(1.0, max(0.0, t))
+    projected_x = start[0] + t * dx
+    projected_y = start[1] + t * dy
+    distance = math.hypot(point[0] - projected_x, point[1] - projected_y)
+    return distance, t
+
+
+def _distinct_endpoint_indices(points: PointsT, part_label: str) -> tuple[int, int]:
+    """Return the first and last index of a part after skipping leading and
+    trailing runs of identical coordinates, so duplicate endpoints collapse
+    onto a single retained boundary vertex."""
+    n = len(points)
+    first = 0
+    while first < n - 1 and _point_xy(points[first]) == _point_xy(points[first + 1]):
+        first += 1
+    last = n - 1
+    while last > 0 and _point_xy(points[last]) == _point_xy(points[last - 1]):
+        last -= 1
+    if first >= last:
+        raise DegeneratePartError(
+            f"{part_label} has no two distinct points, so a replacement edge "
+            "with a traceable flow direction cannot be built."
+        )
+    return first, last
+
+
+def _next_forced_indices(forced: Sequence[bool]) -> list[int]:
+    """For each index i, return the smallest forced index strictly after i
+    (or n - 1 when none exists). A replacement edge may never span a forced
+    vertex, so this bounds how far each candidate edge can reach."""
+    n = len(forced)
+    next_forced = [n - 1] * n
+    upcoming = n - 1
+    for i in range(n - 1, -1, -1):
+        next_forced[i] = upcoming
+        if forced[i]:
+            upcoming = i
+    return next_forced
+
+
+def _simplify_one_part(
+    points: PointsT,
+    tolerances: Sequence[float],
+    forced: Sequence[bool],
+    part_label: str,
+) -> tuple[list[int], list[VertexMapping]]:
+    """Minimum-cardinality simplification of one ordered point sequence.
+
+    Dynamic programming over the retained vertices: an edge (i, j) is feasible
+    when every strictly intermediate vertex is within its own tolerance of
+    the segment points[i]->points[j] and projects onto it without
+    backtracking. Forced vertices may only be used as edge endpoints.
+
+    Leading and trailing runs of identical coordinates collapse onto the
+    single retained boundary vertex, but every skipped duplicate is still
+    covered by the returned mapping. Worst-case complexity is O(n**3), which
+    is practical for the short reaches handled before warehousing.
+    """
+    n = len(points)
+    if n < 2:
+        raise DegeneratePartError(
+            f"{part_label} has {n} point(s); at least two points are required "
+            "to build a replacement edge."
+        )
+
+    keep_forced = list(forced)
+    first, last = _distinct_endpoint_indices(points, part_label)
+    keep_forced[first] = True
+    keep_forced[last] = True
+    next_forced = _next_forced_indices(keep_forced)
+
+    # compat[i][j] is True when the single replacement edge points[i]->points[j]
+    # is permitted to replace all original vertices in the range [i, j].
+    compat: list[list[bool]] = [[False] * n for _ in range(n)]
+    for i in range(first, last):
+        start = _point_xy(points[i])
+        reach = next_forced[i]
+        for j in range(i + 1, reach + 1):
+            end = _point_xy(points[j])
+            if end == start:
+                # A zero-length replacement edge has no downstream direction,
+                # so an anchor vertex must be kept between coincident points.
+                continue
+            feasible = True
+            previous_t = 0.0
+            for k in range(i + 1, j):
+                distance, t = _perpendicular_distance(_point_xy(points[k]), start, end)
+                if t + _SIMPLIFY_EPS < previous_t:
+                    feasible = False  # projection backtracks along the edge
+                    break
+                if distance > tolerances[k] + _SIMPLIFY_EPS:
+                    feasible = False  # vertex exceeds its permitted offset
+                    break
+                previous_t = t
+            compat[i][j] = feasible
+
+    # dp[j] is the minimum number of retained vertices in a feasible path
+    # ending at vertex j; parent[j] is the retained vertex preceding it.
+    # The path starts at the first distinct boundary vertex.
+    unreachable = n + 1
+    dp = [unreachable] * n
+    parent = [-1] * n
+    dp[first] = 1
+    for j in range(first + 1, last + 1):
+        best = unreachable
+        best_parent = -1
+        for i in range(first, j):
+            if compat[i][j]:
+                candidate = dp[i] + 1
+                if candidate < best:
+                    best = candidate
+                    best_parent = i
+        dp[j] = best
+        parent[j] = best_parent
+    if dp[last] == unreachable:
+        # Reached when two consecutive required vertices coincide, so no
+        # traceable replacement edge can connect them.
+        raise DegeneratePartError(
+            f"{part_label} could not be simplified while retaining all "
+            "required vertices."
+        )
+
+    kept: list[int] = []
+    cursor = last
+    while cursor != -1:
+        kept.append(cursor)
+        cursor = parent[cursor]
+    kept.reverse()
+
+    # Cover every original index, including collapsed duplicate boundary runs.
+    mappings: list[VertexMapping | None] = [None] * n
+    last_edge = len(kept) - 2
+    for edge_index, (a, b) in enumerate(zip(kept, kept[1:])):
+        start = _point_xy(points[a])
+        end = _point_xy(points[b])
+        covered_from = 0 if edge_index == 0 else a
+        for k in range(covered_from, b):
+            if k < a:  # leading duplicate of the retained start
+                mappings[k] = VertexMapping(edge_index, edge_index, 0.0, 0.0)
+                continue
+            distance, t = _perpendicular_distance(_point_xy(points[k]), start, end)
+            mappings[k] = VertexMapping(edge_index, edge_index, distance, t)
+    for k in range(last, n):  # retained end plus any trailing duplicates
+        mappings[k] = VertexMapping(last_edge, last_edge, 0.0, 1.0)
+
+    if any(mapping is None for mapping in mappings):  # pragma: no cover
+        raise DegeneratePartError(
+            f"{part_label} has vertices not covered by any replacement edge."
+        )
+    return kept, cast(list[VertexMapping], mappings)
+
+
+def flow_direction_traceable(
+    points: PointsT, kept: Sequence[int], mappings: Sequence[VertexMapping]
+) -> bool:
+    """Check that water can still be traced downstream after simplification.
+
+    Every original edge must have a non-negative component along the
+    replacement edge direction (equivalently, projection parameters never
+    decrease), and no replacement edge may collapse to zero length. Use this
+    on small reaches containing fold-backs or repeated identical coordinates.
+    """
+    if len(kept) < 2:
+        return False
+    for edge_index, (a, b) in enumerate(zip(kept, kept[1:])):
+        start = _point_xy(points[a])
+        end = _point_xy(points[b])
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        if dx * dx + dy * dy <= _SIMPLIFY_EPS:
+            return False
+        previous_t = 0.0
+        for k in range(a, b + 1):
+            mapping = mappings[k]
+            if mapping.new_edge != edge_index:
+                continue
+            if mapping.t + _SIMPLIFY_EPS < previous_t:
+                return False
+            previous_t = mapping.t
+    return True
+
+
+def _is_real_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_nested_sequence(value: object) -> bool:
+    return (
+        isinstance(value, Sequence)
+        and not isinstance(value, (str, bytes))
+        and bool(value)
+        and all(
+            isinstance(item, Sequence) and not isinstance(item, (str, bytes))
+            for item in value
+        )
+    )
+
+
+def _validate_tolerance_sequence(
+    tolerances: Sequence[float], length: int, label: str
+) -> list[float]:
+    if len(tolerances) != length:
+        raise ToleranceError(
+            f"{label} tolerances have length {len(tolerances)}, expected {length}."
+        )
+    normalized: list[float] = []
+    for index, tolerance in enumerate(tolerances):
+        if not _is_real_number(tolerance) or math.isnan(tolerance):
+            raise ToleranceError(
+                f"{label} tolerance at index {index} is not a finite number: "
+                f"{tolerance!r}."
+            )
+        if tolerance < 0.0:
+            raise ToleranceError(
+                f"{label} tolerance at index {index} is negative: {tolerance!r}."
+            )
+        normalized.append(float(tolerance))
+    return normalized
+
+
+def _normalize_part_inputs(
+    lines: Sequence[PointsT],
+    tolerances: float | Sequence[float] | Sequence[Sequence[float]],
+    forced: Sequence[bool] | Sequence[Sequence[bool]] | None,
+) -> tuple[list[list[float]], list[list[bool]]]:
+    part_lengths = [len(part) for part in lines]
+    total_length = sum(part_lengths)
+
+    if isinstance(tolerances, (int, float)) and not isinstance(tolerances, bool):
+        broadcast = float(tolerances)
+        if math.isnan(broadcast) or broadcast < 0.0:
+            raise ToleranceError(f"Global tolerance must be >= 0, got {broadcast!r}.")
+        tolerance_parts = [[broadcast] * length for length in part_lengths]
+    elif _is_nested_sequence(tolerances):
+        nested_tolerances = cast(Sequence[Sequence[float]], tolerances)
+        if len(nested_tolerances) != len(lines):
+            raise ToleranceError(
+                f"Got tolerance sequences for {len(nested_tolerances)} parts but "
+                f"there are {len(lines)} parts."
+            )
+        tolerance_parts = [
+            _validate_tolerance_sequence(item, part_lengths[index], f"Part {index}")
+            for index, item in enumerate(nested_tolerances)
+        ]
+    else:
+        if not isinstance(tolerances, Sequence) or isinstance(tolerances, (str, bytes)):
+            raise ToleranceError(
+                "tolerances must be a number or a sequence of numbers, got "
+                f"{tolerances!r}."
+            )
+        flat = _validate_tolerance_sequence(
+            cast(Sequence[float], tolerances), total_length, "Flat"
+        )
+        tolerance_parts = []
+        offset = 0
+        for length in part_lengths:
+            tolerance_parts.append(flat[offset : offset + length])
+            offset += length
+
+    if forced is None:
+        forced_parts = [[False] * length for length in part_lengths]
+    elif _is_nested_sequence(forced):
+        nested_forced = cast(Sequence[Sequence[bool]], forced)
+        if len(nested_forced) != len(lines):
+            raise ShapefileException(
+                f"Got forced-marker sequences for {len(nested_forced)} parts but "
+                f"there are {len(lines)} parts."
+            )
+        forced_parts = []
+        for index, markers in enumerate(nested_forced):
+            if len(markers) != part_lengths[index]:
+                raise ShapefileException(
+                    f"Part {index} forced markers have length {len(markers)}, "
+                    f"expected {part_lengths[index]}."
+                )
+            forced_parts.append([bool(marker) for marker in markers])
+    else:
+        if not isinstance(forced, Sequence) or isinstance(forced, (str, bytes)):
+            raise ShapefileException(
+                f"forced must be a sequence of boolean markers, got {forced!r}."
+            )
+        flat_forced = list(cast(Sequence[bool], forced))
+        if len(flat_forced) != total_length:
+            raise ShapefileException(
+                f"Flat forced markers have length {len(flat_forced)}, expected "
+                f"{total_length} (the total number of vertices)."
+            )
+        forced_parts = []
+        offset = 0
+        for length in part_lengths:
+            forced_parts.append(
+                [bool(marker) for marker in flat_forced[offset : offset + length]]
+            )
+            offset += length
+
+    return tolerance_parts, forced_parts
+
+
+def simplify_lines(
+    lines: Sequence[PointsT],
+    tolerances: float | Sequence[float] | Sequence[Sequence[float]],
+    forced: Sequence[bool] | Sequence[Sequence[bool]] | None = None,
+    confluence: Sequence[tuple[int, int]] | None = None,
+    check_flow: bool = False,
+) -> SimplifiedLines:
+    """Simplify one or more ordered line parts to the minimum vertex
+    subsequence satisfying per-point offset limits.
+
+    Args:
+        lines: each part is an ordered list of points (2D, 3D or measured
+            tuples), in downstream order.
+        tolerances: permitted perpendicular offset for every point. Either a
+            single number applied to all points, one flat sequence spanning
+            all parts, or a per-part sequence of sequences. Negative or NaN
+            values raise ToleranceError.
+        forced: sample points that must be retained, given as a flat boolean
+            sequence across all parts or a per-part list of boolean sequences.
+            Part boundaries (the distinct first and last point of each part)
+            are always retained even when not marked.
+        confluence: confluence points shared by adjacent reaches, given as
+            (part index, local point index) pairs; they are always retained.
+        check_flow: when True, raise DegeneratePartError if any simplified
+            part loses its traceable flow direction (a replacement edge of
+            zero length, or projections that backtrack). When False (the
+            default) every part is still checked internally for monotonic
+            projection; use flow_direction_traceable() explicitly on parts
+            containing fold-backs or repeated identical coordinates.
+
+    Returns:
+        A SimplifiedLines named tuple holding the simplified point lists, the
+        old-to-new VertexMapping for every original point, and the local
+        indices of the retained vertices of each part.
+    """
+    if not lines:
+        raise DegeneratePartError("At least one line part is required.")
+
+    tolerance_parts, forced_parts = _normalize_part_inputs(lines, tolerances, forced)
+
+    confluence_set: set[tuple[int, int]] = set(confluence or [])
+    for part_index, local_index in confluence_set:
+        if not 0 <= part_index < len(lines):
+            raise ShapefileException(
+                f"Confluence part index {part_index} is out of range "
+                f"(0..{len(lines) - 1})."
+            )
+        if not 0 <= local_index < len(lines[part_index]):
+            raise ShapefileException(
+                f"Confluence local index {local_index} is out of range for "
+                f"part {part_index} (0..{len(lines[part_index]) - 1})."
+            )
+        forced_parts[part_index][local_index] = True
+
+    new_lines: list[PointsT] = []
+    all_mappings: list[list[VertexMapping]] = []
+    all_kept: list[list[int]] = []
+    for part_index, part in enumerate(lines):
+        kept, mappings = _simplify_one_part(
+            part,
+            tolerance_parts[part_index],
+            forced_parts[part_index],
+            part_label=f"Part {part_index}",
+        )
+        if check_flow and not flow_direction_traceable(part, kept, mappings):
+            raise DegeneratePartError(
+                f"Part {part_index} cannot be simplified while keeping the "
+                "flow direction traceable (check fold-backs and repeated "
+                "coordinates)."
+            )
+        new_lines.append([part[index] for index in kept])
+        all_mappings.append(mappings)
+        all_kept.append(kept)
+
+    return SimplifiedLines(lines=new_lines, mappings=all_mappings, kept=all_kept)
+
+
 # Could be an Enum, but an isinstance check is still needed.
 class _NoShapeTypeSentinel:
     """An instance is the default value for Shape.__init__,
@@ -1519,6 +1983,84 @@ still included but were encoded as GeoJSON exterior rings instead of holes."
 
         raise GeoJSON_Error(
             f'Shape type "{SHAPETYPE_LOOKUP[self.shapeType]}" cannot be represented as GeoJSON.'
+        )
+
+    def _part_lines(self) -> list[PointsT]:
+        """Split the flat point list into per-part point lists using the
+        stored part start indices."""
+        starts = list(self.parts) + [len(self.points)]
+        return [self.points[starts[i] : starts[i + 1]] for i in range(len(starts) - 1)]
+
+    def simplify(
+        self,
+        tolerances: float | Sequence[float] | Sequence[Sequence[float]],
+        forced: Sequence[bool] | Sequence[Sequence[bool]] | None = None,
+        confluence: Sequence[Point2D] | None = None,
+        check_flow: bool = False,
+    ) -> SimplifiedShape:
+        """Return the minimum-vertex simplification of this part-based shape.
+
+        Only polyline, polygon and multipatch shape types can be simplified.
+        Every part boundary is retained, and vertices matching a coordinate
+        in confluence (the shared confluence points of adjacent reaches) or
+        flagged in forced are kept too. Per-point tolerances may be supplied
+        as a single value, a flat sequence over all vertices, or per part.
+
+        See simplify_lines() for the meaning of the returned mappings and the
+        check_flow option.
+        """
+        if self.shapeType not in _CanHaveParts_shapeTypes:
+            raise ShapefileException(
+                f"Only polyline, polygon and multipatch shapes can be "
+                f"simplified, not: {self.shapeTypeName}."
+            )
+
+        lines = self._part_lines()
+        confluence_pairs: list[tuple[int, int]] = []
+        if confluence:
+            targets = [_point_xy(point) for point in confluence]
+            for part_index, part in enumerate(lines):
+                for local_index, point in enumerate(part):
+                    if _point_xy(point) in targets:
+                        confluence_pairs.append((part_index, local_index))
+
+        result = simplify_lines(
+            lines,
+            tolerances,
+            forced=forced,
+            confluence=confluence_pairs,
+            check_flow=check_flow,
+        )
+
+        # Re-order the Z and M arrays (when present) to follow the new vertices.
+        starts = list(self.parts) + [len(self.points)]
+        old_z = getattr(self, "z", None)
+        old_m = getattr(self, "m", None)
+        new_z: list[float] | None = None
+        new_m: list[float | None] | None = None
+        if old_z is not None:
+            old_z = list(old_z)
+            new_z = []
+            for part_index, kept in enumerate(result.kept):
+                offset = starts[part_index]
+                new_z.extend(old_z[offset + local] for local in kept)
+        if old_m is not None:
+            old_m = list(old_m)
+            new_m = []
+            for part_index, kept in enumerate(result.kept):
+                offset = starts[part_index]
+                new_m.extend(old_m[offset + local] for local in kept)
+
+        new_shape = Shape(
+            shapeType=self.shapeType,
+            lines=result.lines,
+            partTypes=getattr(self, "partTypes", None),
+            z=new_z,
+            m=new_m,
+            oid=self._oid,
+        )
+        return SimplifiedShape(
+            shape=new_shape, mappings=result.mappings, kept=result.kept
         )
 
     @staticmethod

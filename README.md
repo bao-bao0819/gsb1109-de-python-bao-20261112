@@ -53,6 +53,7 @@ The Python Shapefile Library (PyShp) reads and writes ESRI Shapefiles in pure Py
     	- [Shapefiles with measurement (M) values](#shapefiles-with-measurement-m-values)
 		- [Shapefiles with elevation (Z) values](#shapefiles-with-elevation-z-values)
 		- [3D MultiPatch Shapefiles](#3d-multipatch-shapefiles)
+	- [Simplifying line and ring reaches](#simplifying-line-and-ring-reaches)
 - [Testing](#testing)
 - [Contributors](#contributors)
 
@@ -314,6 +315,7 @@ shapeType Point do not have a bounding box 'bbox'.
 	'points_3D'
 	'shapeType'
 	'shapeTypeName'
+	'simplify'
 	'write_to_byte_stream'
 
   * `oid`: The shape's index position in the original shapefile.
@@ -1400,6 +1402,90 @@ its roof:
 
 For an introduction to the various multipatch part types and examples of how to create 3D MultiPatch objects see [this
 ESRI White Paper](http://downloads.esri.com/support/whitepapers/ao_/J9749_MultiPatch_Geometry_Type.pdf).
+
+
+## Simplifying line and ring reaches
+
+Before warehousing a river network you often need to thin the vertices of each
+reach while keeping it faithful to the surveyed points. PyShp can simplify
+polyline, polygon and multipatch shapes to the smallest subsequence of the
+original vertices that still respects the survey. Two conditions are enforced
+for every omitted point:
+
+  * its perpendicular distance from the replacement edge stays within the
+    permitted offset (tolerance) measured at that point, and
+  * it projects onto the replacement edge in original order, so the projected
+    positions never backtrack and the downstream flow stays traceable.
+
+Confluence points shared by reaches, part boundaries and explicitly marked
+sample points are always retained. Use the module-level `simplify_lines()` on
+plain coordinate lists, passing either one global tolerance, one tolerance per
+vertex across all parts, or a separate tolerance list for each part:
+
+	>>> from shapefile import simplify_lines
+	>>> points = [(0, 0), (1, 1), (2, 0), (3, 1), (4, 0)]
+	>>> result = simplify_lines([points], 10.0)
+	>>> result.kept
+	[[0, 4]]
+	>>> result.lines
+	[[(0, 0), (4, 0)]]
+
+Each original vertex is mapped to the replacement edge (`new_edge`,
+`new_position`) and the projection parameter `t` along it, together with the
+perpendicular `distance`. A `t` of 0.0 is the edge start and 1.0 its end:
+
+	>>> result.mappings[0][0]
+	VertexMapping(new_edge=0, new_position=0, distance=0.0, t=0.0)
+	>>> result.mappings[0][1]
+	VertexMapping(new_edge=0, new_position=0, distance=1.0, t=0.25)
+	>>> result.mappings[0][4]
+	VertexMapping(new_edge=0, new_position=0, distance=0.0, t=1.0)
+
+Per-point tolerances let a single accurately surveyed vertex keep an anchor:
+
+	>>> lines = [[(0, 0), (1, 5), (2, 0)], [(0, 0), (1, 1), (2, 0)]]
+	>>> tolerances = [[10.0, 1.0, 10.0], [10.0, 10.0, 10.0]]
+	>>> simplify_lines(lines, tolerances).kept
+	[[0, 1, 2], [0, 2]]
+
+Mark sample points with `forced` (a flat boolean sequence over all vertices, or
+one list per part), and shared confluence points with `confluence` as
+`(part index, local point index)` pairs; both are always retained:
+
+	>>> forced = [[False, False, True, False, False]]
+	>>> simplify_lines([points], 10.0, forced=forced).kept
+	[[0, 2, 4]]
+	>>> confluence = [(0, 1), (1, 1)]
+	>>> simplify_lines(lines, 100.0, confluence=confluence).kept
+	[[0, 1, 2], [0, 1, 2]]
+
+Small reaches may contain fold-backs or runs of identical coordinates. The
+algorithm keeps an anchor vertex whenever a single replacement edge would
+collapse to zero length or backtrack, and `flow_direction_traceable()` lets you
+verify the result. Pass `check_flow=True` to raise instead of returning a
+result whose flow cannot be traced:
+
+	>>> import shapefile
+	>>> reach = shapefile.Polyline([(0, 0), (1, 0), (2, 0), (1, 0), (0, 0)])
+	>>> simplified = reach.simplify(10.0, check_flow=True)
+	>>> simplified.kept
+	[[0, 1, 4]]
+	>>> shapefile.flow_direction_traceable(reach.points, simplified.kept[0], simplified.mappings[0])
+	True
+
+`Shape.simplify()` returns a `SimplifiedShape` holding a new shape of the same
+type (its Z and M arrays are re-ordered to follow the retained vertices), the
+per-part mappings and the retained indices. Confluence points can also be given
+by coordinate, in which case every matching vertex across all parts is kept:
+
+	>>> network = shapefile.Polyline([(0, 0), (5, 5), (9, 9)], [(1, 1), (5, 5), (2, 2)])
+	>>> network.simplify(100.0, confluence=[(5, 5)]).kept
+	[[0, 1, 2], [0, 1, 2]]
+
+A part that has fewer than two distinct points cannot carry a traceable
+replacement edge and raises `DegeneratePartError`; negative or missing
+tolerances raise `ToleranceError`. Point and MultiPoint shapes cannot be
+simplified and raise a `ShapefileException`.
 
 
 
