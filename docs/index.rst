@@ -94,6 +94,30 @@ Rate Limiter
 
    .. automethod:: __init__
 
+Multi-Source Planning
++++++++++++++++++++++
+
+.. automodule:: geopy.extra.planner
+   :members: __doc__
+
+.. autoclass:: geopy.extra.planner.Source
+
+.. autoclass:: geopy.extra.planner.Store
+
+.. autoclass:: geopy.extra.planner.Plan
+
+.. autoclass:: geopy.extra.planner.PlannedRequest
+
+.. autoclass:: geopy.extra.planner.RoundResult
+
+.. autofunction:: geopy.extra.planner.plan_round
+
+.. autofunction:: geopy.extra.planner.execute_plan
+
+.. autofunction:: geopy.extra.planner.merge_evidence
+
+.. autofunction:: geopy.extra.planner.normalize_address
+
 ArcGIS
 ------
 
