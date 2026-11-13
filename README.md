@@ -1230,6 +1230,31 @@ Another common use-case is that we only want to read those records that are loca
 
 This functionality means that shapefiles can be used as a bare-bones spatially indexed database, with very fast bounding box queries for even the largest of shapefiles. Note that, as with all spatial indexing, this method does not guarantee that the *geometries* of the resulting matches overlap the queried region, only that their *bounding boxes* overlap.
 
+### Wrap-around longitude windows
+
+An ordinary `bbox` treats coordinates as a flat plane, so it cannot describe a window that crosses the antimeridian (the +/-180 degree meridian), such as the Pacific window from 170 degrees east to 170 degrees west. For these windows, where `xmin > xmax`, the Reader provides a separate family of explicit wrap-around queries: `iterShapesWrapAround`, `shapesWrapAround`, `shapeWrapAround`, `iterShapeRecordsWrapAround`, `shapeRecordsWrapAround` and `shapeRecordWrapAround`.
+
+The query runs in two passes. Each record is first rejected cheaply from the bounding box stored in its shape header, without parsing its geometry, whenever its latitude cannot overlap the window or its longitude span cannot reach either window edge. Only the surviving records have their geometry parsed and tested segment by segment: a polyline or polygon qualifies when one of its parts actually enters the window, and the separate parts of one record are independent chains that are never connected to each other. A record whose track enters through both sides of the Pacific is still returned only once, keeping its original record number as the shape's (and record's) `oid`.
+
+Longitude is interpreted cyclically, and all window edges are inclusive. A vertex exactly on the antimeridian is accepted whether stored as +180 or -180; the +180 representation belongs to the eastern half of the window and the -180 representation to the western half. Segments that jump over the antimeridian between two consecutive vertices are cut at +/-180 before testing, so their real great-circle-side path is used rather than the long straight line drawn across the ordinary map. MultiPoint shapes are treated as isolated point clouds: only vertex inclusion is tested and their points are never connected into segments.
+
+```python
+# Window from 170E to 170W: xmin > xmax marks it as wrapping
+wrap_bbox = [170.0, -80.0, -170.0, 80.0]
+
+# Original record numbers of the tracks that cross the window
+oids = [shape.oid for shape in sf.iterShapesWrapAround(wrap_bbox)]
+
+# Geometry plus attributes, one entry per original record
+for shape_rec in sf.iterShapeRecordsWrapAround(wrap_bbox):
+    ...
+
+# Ordinary, non-wrapping windows keep using the plain planar bbox query
+shapes = sf.shapes(bbox=[36.423, 12.360, 43.123, 18.004])
+```
+
+Passing a non-wrapping bbox (`xmin <= xmax`) to a wrap-around method raises a `ShapefileException`, since those coordinates keep their ordinary planar meaning and should be queried with the regular `bbox` methods.
+
 
 
 ## Writing large shapefiles

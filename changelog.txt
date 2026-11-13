@@ -1,3 +1,7 @@
+VERSION 3.1.9
+2026-11-13
+	* Added explicit wrap-around Reader queries for longitude windows crossing the antimeridian (bbox with xmin > xmax, e.g. 170 to -170): iterShapesWrapAround/shapesWrapAround/shapeWrapAround and the matching ShapeRecord methods. Records are first excluded from their stored bounding box, then accepted only when a part's segments actually pass through the window. Parts are never connected, window edges and the +/-180 antimeridian have fixed inclusive ownership, and each original record number is returned at most once.
+
 VERSION 3.1.8
 2026-11-07
 	* Avoid unnecessary seeks in Reader.iterShapeRecords with a bbox.  Removed lots of deletion field checks (prefer dbfReader.data_fields). Replace two while loops with simpler alternatives.

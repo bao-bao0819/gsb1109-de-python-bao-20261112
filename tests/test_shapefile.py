@@ -1509,6 +1509,231 @@ def test_bboxfilter_itershaperecords():
             assert shaperec.record == man.record
 
 
+WRAP_BBOX = [170.0, -80.0, -170.0, 80.0]  # xmin > xmax: Pacific window
+
+
+def _write_wrap_around_lines(path):
+    """Writes polyline records exercising the antimeridian-wrap window:
+    record index is the original record number callers get back."""
+    with shapefile.Writer(path) as w:
+        w.field("name", "C", 20)
+
+        w.record("cross")  # 0: enters via both halves, must be returned once
+        w.line([[(160.0, 0.0), (175.0, 5.0), (-175.0, 5.0), (-160.0, 0.0)]])
+
+        w.record("outside")  # 1: wholly in the excluded middle
+        w.line([[(100.0, 0.0), (120.0, 0.0)]])
+
+        w.record("parts")  # 2: two independent parts, only the first crosses
+        w.line(
+            [
+                [(172.0, 10.0), (-172.0, 10.0)],
+                [(0.0, 0.0), (10.0, 0.0)],
+            ]
+        )
+
+        w.record("edge-touch")  # 3: segment reaches x=170 at an interior point
+        w.line([[(160.0, 20.0), (180.0, 20.0)]])
+
+        w.record("edge-vertex")  # 4: vertex exactly on x=170
+        w.line([[(160.0, 30.0), (170.0, 30.0), (165.0, 30.0)]])
+
+        w.record("plus-180")  # 5: vertex exactly on +180 (east half)
+        w.line([[(178.0, 40.0), (180.0, 40.0)]])
+
+        w.record("minus-180")  # 6: vertex exactly on -180 (west half)
+        w.line([[(-180.0, 40.0), (-178.0, 40.0)]])
+
+        w.record("lat-out")  # 7: crosses in longitude but outside latitude
+        w.line([[(175.0, 85.0), (-175.0, 85.0)]])
+
+        w.record("null")  # 8: null shape
+        w.null()
+
+        w.record("dateline-jump")  # 9: >180 degree segment jumping over dateline
+        w.line([[(140.0, 0.0), (-118.0, 0.0)]])
+
+        w.record("wide-but-misses")  # 10: wide bbox, segments stay in the middle
+        w.line([[(-118.0, 0.0), (0.0, 0.0), (140.0, 0.0)]])
+
+        w.record("horizontal-entry")  # 11: enters a half through a horizontal edge
+        w.line([[(-175.0, 90.0), (-175.0, 70.0)]])
+
+
+def test_wraparound_itershapes(tmp_path):
+    """Two-pass wrap-around query: bbox pre-filter plus per-segment decision."""
+    path = str(tmp_path / "lines")
+    _write_wrap_around_lines(path)
+    expected = [0, 2, 3, 4, 5, 6, 9, 11]
+
+    with shapefile.Reader(path) as sf:
+        shapes = list(sf.iterShapesWrapAround(WRAP_BBOX))
+        assert [shape.oid for shape in shapes] == expected
+        # a record spanning both halves is still a single delivery
+        assert len({shape.oid for shape in shapes}) == len(shapes)
+        assert [shape.oid for shape in sf.shapesWrapAround(WRAP_BBOX)] == expected
+
+
+def test_wraparound_shape(tmp_path):
+    """Single-record wrap-around accessor honours the same decisions."""
+    path = str(tmp_path / "lines")
+    _write_wrap_around_lines(path)
+
+    with shapefile.Reader(path) as sf:
+        assert sf.shapeWrapAround(0, WRAP_BBOX) is not None
+        assert sf.shapeWrapAround(2, WRAP_BBOX) is not None
+        assert sf.shapeWrapAround(1, WRAP_BBOX) is None
+        assert sf.shapeWrapAround(8, WRAP_BBOX) is None  # null
+        assert sf.shapeWrapAround(10, WRAP_BBOX) is None  # wide but middle only
+
+        with pytest.raises(shapefile.ShapefileException):
+            sf.shapeWrapAround(0, [0.0, 0.0, 10.0, 10.0])  # not a wrapping bbox
+
+
+def test_wraparound_empty_reader(tmp_path):
+    """An empty shapefile yields nothing and rejects indexed access cleanly."""
+    path = tmp_path / "empty"
+    with shapefile.Writer(str(path), shapeType=shapefile.POLYLINE) as w:
+        w.field("name", "C", 10)
+
+    with shapefile.Reader(str(path) + ".shp") as sf:
+        assert list(sf.iterShapesWrapAround(WRAP_BBOX)) == []
+        with pytest.raises(shapefile.ShapefileException):
+            sf.shapeWrapAround(0, WRAP_BBOX)
+
+
+def test_wraparound_shaperecords(tmp_path):
+    """Returned ShapeRecords keep the original record numbers, once each."""
+    path = str(tmp_path / "lines")
+    _write_wrap_around_lines(path)
+    expected = [0, 2, 3, 4, 5, 6, 9, 11]
+
+    with shapefile.Reader(path) as sf:
+        records = list(sf.iterShapeRecordsWrapAround(WRAP_BBOX))
+        assert [sr.shape.oid for sr in records] == expected
+        assert [sr.record.oid for sr in records] == expected
+        assert all(sr.shape.oid == sr.record.oid for sr in records)
+        assert len(sf.shapeRecordsWrapAround(WRAP_BBOX)) == len(expected)
+
+        sr = sf.shapeRecordWrapAround(2, WRAP_BBOX)
+        assert sr is not None and sr.record[0] == "parts"
+        assert sf.shapeRecordWrapAround(1, WRAP_BBOX) is None
+
+
+def test_wraparound_parts_not_connected(tmp_path):
+    """No segment is drawn between separate parts of one polyline."""
+    path = str(tmp_path / "parts")
+    with shapefile.Writer(path) as w:
+        w.field("name", "C", 20)
+        # first part far outside, second part touching the east edge
+        w.record("edge-only-part")
+        w.line([[(0.0, 0.0), (10.0, 0.0)], [(160.0, 0.0), (170.0, 0.0)]])
+        # both parts wholly outside the window
+        w.record("both-outside")
+        w.line([[(0.0, 0.0), (10.0, 0.0)], [(20.0, 0.0), (30.0, 0.0)]])
+
+    with shapefile.Reader(path) as sf:
+        assert [shape.oid for shape in sf.iterShapesWrapAround(WRAP_BBOX)] == [0]
+
+
+def test_wraparound_points_and_multipoints(tmp_path):
+    """Points use cyclic longitude; multipoints are clouds without segments."""
+    point_path = str(tmp_path / "points")
+    with shapefile.Writer(point_path, shapeType=shapefile.POINT) as w:
+        w.field("name", "C", 10)
+        for name, x, y in [
+            ("in", 175.0, 10.0),
+            ("out", 0.0, 0.0),
+            ("plus180", 180.0, 10.0),
+            ("minus180", -180.0, 10.0),
+            ("edge", 170.0, 10.0),
+            ("latout", 175.0, 90.0),
+        ]:
+            w.record(name)
+            w.point(x, y)
+
+    with shapefile.Reader(point_path) as sf:
+        assert [shape.oid for shape in sf.iterShapesWrapAround(WRAP_BBOX)] == [
+            0,
+            2,
+            3,
+            4,
+        ]
+
+    multipoint_path = str(tmp_path / "multipoints")
+    with shapefile.Writer(multipoint_path, shapeType=shapefile.MULTIPOINT) as w:
+        w.field("name", "C", 10)
+        w.record("cloud-hit")
+        w.multipoint([(0.0, 0.0), (-175.0, 5.0), (50.0, 5.0)])
+        w.record("cloud-miss")
+        w.multipoint([(0.0, 0.0), (50.0, 5.0)])
+
+    with shapefile.Reader(multipoint_path) as sf:
+        assert [shape.oid for shape in sf.iterShapesWrapAround(WRAP_BBOX)] == [0]
+
+
+def test_wraparound_polygon(tmp_path):
+    """Polygon rings are tested as connected parts like polylines."""
+    path = str(tmp_path / "polygons")
+    with shapefile.Writer(path, shapeType=shapefile.POLYGON) as w:
+        w.field("name", "C", 20)
+        w.record("crossing-ring")
+        w.poly(
+            [
+                [
+                    (172.0, -2.0),
+                    (172.0, 2.0),
+                    (-172.0, 2.0),
+                    (-172.0, -2.0),
+                    (172.0, -2.0),
+                ]
+            ]
+        )
+        w.record("middle-ring")
+        w.poly(
+            [
+                [
+                    (100.0, -2.0),
+                    (100.0, 2.0),
+                    (120.0, 2.0),
+                    (120.0, -2.0),
+                    (100.0, -2.0),
+                ]
+            ]
+        )
+
+    with shapefile.Reader(path) as sf:
+        assert [shape.oid for shape in sf.iterShapesWrapAround(WRAP_BBOX)] == [0]
+
+
+def test_wraparound_no_shx(tmp_path):
+    """The wrap-around query works by reading .shp headers when .shx is absent."""
+    path = tmp_path / "lines"
+    _write_wrap_around_lines(str(path))
+    path.with_suffix(".shx").unlink()
+    expected = [0, 2, 3, 4, 5, 6, 9, 11]
+
+    with shapefile.Reader(str(path)) as sf:
+        assert [shape.oid for shape in sf.iterShapesWrapAround(WRAP_BBOX)] == expected
+        assert sf.shapeWrapAround(1, WRAP_BBOX) is None
+
+
+def test_wraparound_rejects_non_wrapping_bbox(tmp_path):
+    """Ordinary planar windows keep using the plain bbox query."""
+    path = str(tmp_path / "lines")
+    _write_wrap_around_lines(path)
+
+    with shapefile.Reader(path) as sf:
+        with pytest.raises(shapefile.ShapefileException):
+            list(sf.iterShapesWrapAround([0.0, 0.0, 10.0, 10.0]))
+        # the ordinary planar query is unchanged and remains bbox based:
+        # the excluded-middle line still matches a planar window over it
+        planar = [shape.oid for shape in sf.iterShapes(bbox=[90.0, -10.0, 130.0, 10.0])]
+        assert 1 in planar
+        # while the wrap-around window correctly rejects that same line
+        assert 1 not in [shape.oid for shape in sf.iterShapesWrapAround(WRAP_BBOX)]
+
+
 def test_shaperecords_shaperecord():
     """
     Assert that shapeRecords returns a list of

@@ -2484,6 +2484,276 @@ SHAPE_CLASS_FROM_SHAPETYPE: dict[int, type[NullShape | Point | _CanHaveBBox]] = 
 }
 
 
+# Longitude of the antimeridian, where the +180 and -180 meridians coincide.
+DATELINE_LONGITUDE: Final[float] = 180.0
+
+
+def _point_in_rect(x: float, y: float, rect: BBox) -> bool:
+    """Inclusive point-in-rectangle test on ordinary planar coordinates."""
+    xmin, ymin, xmax, ymax = rect
+    return xmin <= x <= xmax and ymin <= y <= ymax
+
+
+def _orientation(
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+    cx: float,
+    cy: float,
+) -> int:
+    """Sign of the cross product of vectors AB and AC: 1, -1 or 0 (collinear)."""
+    value = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    if value > 0:
+        return 1
+    if value < 0:
+        return -1
+    return 0
+
+
+def _on_segment(
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+    cx: float,
+    cy: float,
+) -> bool:
+    """Whether collinear point C lies on segment AB."""
+    return min(ax, bx) <= cx <= max(ax, bx) and min(ay, by) <= cy <= max(ay, by)
+
+
+def _segments_intersect(p1: PointT, p2: PointT, q1: PointT, q2: PointT) -> bool:
+    """Whether two straight segments meet, including endpoint touches and
+    overlaps of collinear segments. All edges are inclusive.
+    """
+    x1, y1 = p1[0], p1[1]
+    x2, y2 = p2[0], p2[1]
+    u1, v1 = q1[0], q1[1]
+    u2, v2 = q2[0], q2[1]
+
+    o1 = _orientation(x1, y1, x2, y2, u1, v1)
+    o2 = _orientation(x1, y1, x2, y2, u2, v2)
+    o3 = _orientation(u1, v1, u2, v2, x1, y1)
+    o4 = _orientation(u1, v1, u2, v2, x2, y2)
+
+    if o1 != o2 and o3 != o4:
+        return True
+
+    # Collinear endpoint lying on the other segment.
+    if o1 == 0 and _on_segment(x1, y1, x2, y2, u1, v1):
+        return True
+    if o2 == 0 and _on_segment(x1, y1, x2, y2, u2, v2):
+        return True
+    if o3 == 0 and _on_segment(u1, v1, u2, v2, x1, y1):
+        return True
+    if o4 == 0 and _on_segment(u1, v1, u2, v2, x2, y2):
+        return True
+    return False
+
+
+def _segment_intersects_rect(p1: PointT, p2: PointT, rect: BBox) -> bool:
+    """Whether segment p1->p2 meets an ordinary rectangle. Boundary counts as
+    inside, so a segment merely grazing an edge is still reported.
+    """
+    if _point_in_rect(p1[0], p1[1], rect) or _point_in_rect(p2[0], p2[1], rect):
+        return True
+
+    xmin, ymin, xmax, ymax = rect
+    corners = (
+        (xmin, ymin),
+        (xmax, ymin),
+        (xmax, ymax),
+        (xmin, ymax),
+    )
+    for edge_start, edge_end in zip(corners, corners[1:] + corners[:1]):
+        if _segments_intersect(p1, p2, edge_start, edge_end):
+            return True
+    return False
+
+
+def _dateline_subsegments(
+    p1: PointT, p2: PointT
+) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """Splits one segment into ordinary planar sub-segments, cutting it at the
+    antimeridian when its endpoints are more than 180 degrees of longitude
+    apart, i.e. when the segment wraps around the +/-180 meridian instead of
+    running across the ordinary map. Segments spanning exactly 180 degrees are
+    kept as-is, which gives that boundary case a fixed planar interpretation.
+    """
+    x1, y1 = p1[0], p1[1]
+    x2, y2 = p2[0], p2[1]
+    dx = x2 - x1
+
+    if -180.0 <= dx <= 180.0:
+        return [((x1, y1), (x2, y2))]
+
+    # Endpoints labelled -180 and +180 (or the reverse) are the same
+    # antimeridian point. The planar segment between them already covers the
+    # full width of the map, so keep it as one ordinary segment.
+    if x1 == -x2 and abs(x1) == DATELINE_LONGITUDE:
+        return [((x1, y1), (x2, y2))]
+
+    if dx < -180.0:
+        # Travelling eastwards: p1 -> +180, then -180 -> p2.
+        span = 360.0 + dx
+        t = (DATELINE_LONGITUDE - x1) / span
+        y_cross = y1 + t * (y2 - y1)
+        return [
+            ((x1, y1), (DATELINE_LONGITUDE, y_cross)),
+            ((-DATELINE_LONGITUDE, y_cross), (x2, y2)),
+        ]
+
+    # Travelling westwards: p1 -> -180, then +180 -> p2.
+    span = 360.0 - dx
+    t = (x1 + DATELINE_LONGITUDE) / span
+    y_cross = y1 + t * (y2 - y1)
+    return [
+        ((x1, y1), (-DATELINE_LONGITUDE, y_cross)),
+        ((DATELINE_LONGITUDE, y_cross), (x2, y2)),
+    ]
+
+
+def _point_in_wrap_window(
+    x: float,
+    y: float,
+    xmin: float,
+    ymin: float,
+    xmax: float,
+    ymax: float,
+) -> bool:
+    """Point-in-window test for a window wrapping around the antimeridian
+    (xmin > xmax). Longitude is interpreted cyclically, so the window is the
+    union of two ordinary rectangles: [xmin, +180] and [-180, xmax], each
+    bounded by ymin/ymax. All edges are inclusive. The +180 and -180 labels
+    denote the same meridian; a vertex stored as +180 is attributed to the
+    eastern rectangle (the xmin leg), one stored as -180 to the western
+    rectangle (the xmax leg), so either representation is accepted.
+    """
+    if not (ymin <= y <= ymax):
+        return False
+    return (xmin <= x <= DATELINE_LONGITUDE) or (-DATELINE_LONGITUDE <= x <= xmax)
+
+
+def _part_intersects_wrap_window(
+    part: PointsT,
+    xmin: float,
+    ymin: float,
+    xmax: float,
+    ymax: float,
+) -> bool:
+    """Whether one polyline/polygon part actually meets a window that wraps
+    around the antimeridian. Parts are independent chains, so no segment is
+    drawn between them. The wrapping window is split into its two ordinary
+    halves, and a part qualifies if one of its vertices lies in either half
+    or one of its segments (cut at the antimeridian when it wraps) meets
+    either half.
+    """
+    if not part:
+        return False
+
+    east_half = BBox(xmin, ymin, DATELINE_LONGITUDE, ymax)
+    west_half = BBox(-DATELINE_LONGITUDE, ymin, xmax, ymax)
+
+    for point in part:
+        if _point_in_wrap_window(point[0], point[1], xmin, ymin, xmax, ymax):
+            return True
+
+    for p1, p2 in zip(part, part[1:]):
+        for sub_start, sub_end in _dateline_subsegments(p1, p2):
+            if _segment_intersects_rect(
+                sub_start, sub_end, east_half
+            ) or _segment_intersects_rect(sub_start, sub_end, west_half):
+                return True
+    return False
+
+
+def _shape_intersects_wrap_window(shape: Shape, wrap_bbox: BBox) -> bool:
+    """Whether a fully-parsed shape meets a wrap-around longitude window.
+    Line-like shapes (polylines, polygons and multipatches) are tested part by
+    part along their connected segments, and parts are never joined to each
+    other. Multipoints are isolated point clouds: only vertex inclusion is
+    tested and their points are not connected. Single points and null shapes
+    are handled without any segment logic.
+    """
+    xmin, ymin, xmax, ymax = wrap_bbox
+
+    if shape.shapeType in Point_shapeTypes:
+        if not shape.points:
+            return False
+        x, y = shape.points[0][0], shape.points[0][1]
+        return _point_in_wrap_window(x, y, xmin, ymin, xmax, ymax)
+
+    if shape.shapeType in MultiPoint_shapeTypes:
+        return any(
+            _point_in_wrap_window(point[0], point[1], xmin, ymin, xmax, ymax)
+            for point in shape.points
+        )
+
+    if shape.shapeType not in _CanHaveParts_shapeTypes:
+        return False
+
+    part_starts = list(shape.parts)
+    if not part_starts:
+        part_starts = [0]
+    part_starts.append(len(shape.points))
+
+    for start, end in zip(part_starts, part_starts[1:]):
+        if _part_intersects_wrap_window(
+            shape.points[start:end], xmin, ymin, xmax, ymax
+        ):
+            return True
+    return False
+
+
+def _shape_bbox_might_intersect_wrap_window(
+    shape_bbox: BBox,
+    wrap_bbox: BBox,
+) -> bool:
+    """Cheap bounding-box pre-filter for a wrap-around window. This only
+    discards records that cannot possibly meet the window:
+
+    * shapes whose latitude span does not overlap the window's latitude range;
+    * shapes whose longitude span is at most 180 degrees wide (so no segment of
+      theirs can jump over the antimeridian) and whose whole longitude span
+      sits in the excluded middle between the two window edges.
+
+    Anything wider than 180 degrees might contain an antimeridian-jumping
+    segment and is kept for the definitive per-segment test.
+    """
+    sxmin, symin, sxmax, symax = shape_bbox
+    xmin, ymin, xmax, ymax = wrap_bbox
+
+    if not (symin <= ymax and ymin <= symax):
+        return False
+
+    if (sxmax - sxmin) <= 180.0 and not (sxmax >= xmin or sxmin <= xmax):
+        return False
+
+    return True
+
+
+def _read_shape_header_bbox(
+    shp_file: ReadSeekableBinStream,
+    offset: int,
+) -> tuple[int, BBox | None]:
+    """Reads only the shape type code and stored bounding box of one .shp
+    record (seeking past its 8-byte record header), without parsing the rest
+    of the geometry. Returns (shapeType, bbox); bbox is None for null shapes
+    and point shapes, which store no per-shape bounding box in the file.
+    """
+    shp_file.seek(offset + 8)
+    (shape_type,) = unpack("<i", shp_file.read(4))
+
+    if shape_type == NULL or shape_type in Point_shapeTypes:
+        return shape_type, None
+
+    # For the multi-point shape types the 32-byte bounding box immediately
+    # follows the shape type code (Esri Shapefile spec, PolyLine/Polygon etc.).
+    shape_bbox = BBox(*unpack("<4d", shp_file.read(32)))
+    return shape_type, shape_bbox
+
+
 class _Record(list[RecordValue]):
     """
     A class to hold a record. Subclasses list to ensure compatibility with
@@ -4231,6 +4501,152 @@ class Reader(_HasExitStack):
             outside_bbox_as_None=outside_bbox_as_None,
         )
         self.numShapes = len(self.shp_reader.headers_cache)
+
+    def _shape_offsets_and_lengths(self, i: int) -> tuple[int, int]:
+        """Returns the .shp byte offset and content length in Bytes of the
+        shape at index i, using the .shx index when available and the .shp
+        record headers otherwise.
+        """
+        if self._shx:
+            return self.shx_reader.offsets[i], self.shx_reader.shape_lengths_B[i]
+        offset, shape_len_B, _recNum = self.shp_reader.shape_header(i)
+        return offset, shape_len_B
+
+    def iterShapesWrapAround(self, bbox: BBox | Sequence[float]) -> Iterator[Shape]:
+        """Yields the shapes whose polylines or polygons actually pass through
+        a longitude window that wraps around the antimeridian, e.g. the Pacific
+        window from 170 degrees east (xmin) to 170 degrees west (xmax), where
+        xmin > xmax.
+
+        Unlike an ordinary bbox query, longitude is interpreted cyclically, so
+        a track crossing from one side of the Pacific to the other is matched
+        even though its stored bounding box spans the whole map. Each record is
+        first rejected cheaply from its stored bounding box, and only the
+        remaining records have their geometry parsed and tested segment by
+        segment. The separate parts of a shape are independent chains: no
+        segment is ever drawn between two parts.
+
+        Points on the window edges are included. The +180 and -180 labels name
+        the same antimeridian but keep a fixed ownership: a vertex stored as
+        +180 belongs to the eastern half (the xmin leg), one stored as -180 to
+        the western half (the xmax leg), so either representation is accepted.
+        Each shape is yielded at most once, retaining its original record
+        index as its oid. Ordinary, non-wrapping windows should keep using
+        iterShapes, whose plain planar coordinates are queried as-is.
+        """
+        wrap_bbox = BBox(*bbox)
+        if not wrap_bbox.xmin > wrap_bbox.xmax:
+            raise ShapefileException(
+                "A wrap-around bbox requires xmin > xmax (e.g. 170, -90, -170, 90). "
+                f"Got: {tuple(wrap_bbox)}. Use iterShapes for an ordinary bbox."
+            )
+
+        num_shapes = len(self)
+        for i in range(num_shapes):
+            offset, shape_len_B = self._shape_offsets_and_lengths(i)
+
+            # First pass: exclude records that cannot possibly qualify, using
+            # only the cheap per-shape header information.
+            shape_type, shape_bbox = _read_shape_header_bbox(
+                self.shp_reader.file, offset
+            )
+            if shape_type == NULL:
+                continue
+            if shape_bbox is not None and not _shape_bbox_might_intersect_wrap_window(
+                shape_bbox, wrap_bbox
+            ):
+                continue
+
+            # Second pass: parse the full geometry and decide from the actual
+            # segments of each part whether the window is crossed.
+            shape = self.shp_reader.shape(i, offset, shape_len_B)
+            if shape is not None and _shape_intersects_wrap_window(shape, wrap_bbox):
+                yield shape
+
+    def shapesWrapAround(self, bbox: BBox | Sequence[float]) -> Shapes:
+        """Returns all shapes passing through the wrap-around longitude window
+        'bbox' (xmin,ymin,xmax,ymax with xmin > xmax). See iterShapesWrapAround
+        for the exact crossing, edge and antimeridian conventions.
+        """
+        return Shapes(self.iterShapesWrapAround(bbox))
+
+    def shapeWrapAround(self, i: int, bbox: BBox | Sequence[float]) -> Shape | None:
+        """Returns the shape at index i if its geometry passes through the
+        wrap-around longitude window 'bbox' (xmin,ymin,xmax,ymax with
+        xmin > xmax), otherwise None.
+        """
+        wrap_bbox = BBox(*bbox)
+        if not wrap_bbox.xmin > wrap_bbox.xmax:
+            raise ShapefileException(
+                "A wrap-around bbox requires xmin > xmax (e.g. 170, -90, -170, 90). "
+                f"Got: {tuple(wrap_bbox)}. Use shape for an ordinary bbox."
+            )
+        if len(self) == 0:
+            raise ShapefileException("No shapes loaded.")
+        i = ensure_within_bounds(i, len(self))
+        offset, shape_len_B = self._shape_offsets_and_lengths(i)
+        shape_type, shape_bbox = _read_shape_header_bbox(self.shp_reader.file, offset)
+        if shape_type == NULL:
+            return None
+        if shape_bbox is not None and not _shape_bbox_might_intersect_wrap_window(
+            shape_bbox, wrap_bbox
+        ):
+            return None
+        shape = self.shp_reader.shape(i, offset, shape_len_B)
+        if shape is not None and _shape_intersects_wrap_window(shape, wrap_bbox):
+            return shape
+        return None
+
+    def iterShapeRecordsWrapAround(
+        self,
+        bbox: BBox | Sequence[float],
+        fields: list[str] | None = None,
+    ) -> Iterator[ShapeRecord]:
+        """Yields one ShapeRecord per original record whose geometry passes
+        through the wrap-around longitude window 'bbox' (xmin,ymin,xmax,ymax
+        with xmin > xmax). A track spanning both sides of the Pacific is a
+        single record and is therefore delivered only once. Records keep their
+        original indices in the shape's oid and the record's oid.
+        """
+        if self.numRecords is None:
+            raise ShapefileException(
+                "A .dbf file is required to read Records, for ShapeRecords"
+            )
+        for shape in self.iterShapesWrapAround(bbox):
+            record = self.dbf_reader.record(shape.oid, fields=fields)
+            yield ShapeRecord(shape=shape, record=record)
+
+    def shapeRecordsWrapAround(
+        self,
+        bbox: BBox | Sequence[float],
+        fields: list[str] | None = None,
+    ) -> ShapeRecords:
+        """Returns all combination geometry/attribute records whose geometry
+        passes through the wrap-around longitude window 'bbox'
+        (xmin,ymin,xmax,ymax with xmin > xmax). See
+        iterShapesWrapAround for the crossing and edge conventions.
+        """
+        return ShapeRecords(self.iterShapeRecordsWrapAround(bbox, fields=fields))
+
+    def shapeRecordWrapAround(
+        self,
+        i: int,
+        bbox: BBox | Sequence[float],
+        fields: list[str] | None = None,
+    ) -> ShapeRecord | None:
+        """Returns the combination geometry/attribute record at index i if its
+        geometry passes through the wrap-around longitude window 'bbox'
+        (xmin,ymin,xmax,ymax with xmin > xmax), otherwise None.
+        """
+        if self.numRecords is None:
+            raise ShapefileException(
+                "A .dbf file is required to read Records, for ShapeRecords"
+            )
+        shape = self.shapeWrapAround(i, bbox)
+        if shape is None:
+            return None
+        record = self.dbf_reader.record(shape.oid, fields=fields)
+        return ShapeRecord(shape=shape, record=record)
 
     def shapeRecord(
         self,
