@@ -102,5 +102,6 @@ Table of Contents
    install
    user_guide
    numpy_guide
+   quality_control
    formatting
    tech_guide
