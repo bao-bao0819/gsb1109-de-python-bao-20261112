@@ -15,6 +15,22 @@ from .biffh import (
 from .book import Book, colname, open_workbook_xls
 from .compdoc import SIGNATURE as XLS_SIGNATURE
 from .formula import *  # is constrained by __all__
+from .header import (
+    AmbiguousRegion,
+    ColumnHeader,
+    ColumnHeaderMap,
+    HeaderLabel,
+    HeaderLevel,
+    HeaderMatch,
+    HeaderNode,
+    REGION_INDEPENDENT_DUPLICATE,
+    REGION_MERGED,
+    ROLE_LABEL,
+    ROLE_MERGED_SUBORDINATE,
+    ROLE_VACANT,
+    build_column_header_map,
+    cell_address,
+)
 from .info import __VERSION__, __version__
 from .sheet import empty_cell
 from .xldate import XLDateError, xldate_as_datetime, xldate_as_tuple

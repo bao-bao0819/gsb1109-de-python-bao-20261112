@@ -1,6 +1,17 @@
 Changes
 =======
 
+Unreleased
+----------
+
+- Add :mod:`xlrd.header`, which turns a block of multi-row column headers
+  into per-column label paths with the original (merged-anchor or
+  independent) cell coordinates.  Merged regions stay one shared header,
+  truly empty cells, formatted blanks, merged subordinates and same-named
+  independent cells are kept distinct, hidden columns can be projected out
+  without re-attaching surviving paths, and reverse lookups report every
+  match together with the smallest region causing a one-to-many mapping.
+
 2.0.2 (14 June 2025)
 --------------------
 

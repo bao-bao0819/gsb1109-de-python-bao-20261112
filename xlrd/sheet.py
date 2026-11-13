@@ -1743,6 +1743,70 @@ class Sheet(BaseObject):
             return self.defcolwidth * 256
         return 8 * 256 # 8 is what Excel puts in a DEFCOLWIDTH record
 
+    def column_header_map(self, header_rows, colx_range=None,
+                          include_hidden=True):
+        """
+        Build a :class:`~xlrd.header.ColumnHeaderMap` from a block of
+        multi-row column headers.
+
+        Each resulting column path records the original cell coordinate
+        (anchor of a merged region, or the independent cell) for every label
+        level, so that two headers sharing a label such as "数量" stay
+        distinguishable by their parent path and coordinates.
+
+        :param header_rows: a positive number of header rows counted from
+          row 0, or an explicit ``(first_rowx, last_rowx)`` range
+          (exclusive).
+        :param colx_range: optional ``(first_colx, last_colx)`` range
+          (exclusive); defaults to all columns.
+        :param include_hidden: when False, columns marked hidden in a
+          ``COLINFO`` record are excluded from the initial view.
+
+        Merged ranges and the hidden flag are only present when the workbook
+        was opened with ``open_workbook(..., formatting_info=True)``;
+        without that, every header cell is treated as independent and
+        visible.
+        """
+        from .header import build_column_header_map
+        return build_column_header_map(
+            self, header_rows, colx_range=colx_range,
+            include_hidden=include_hidden,
+        )
+
+    def column_paths(self, header_rows, colx_range=None,
+                     include_hidden=True):
+        """
+        Yield ``(colx, path, path_origins)`` tuples for the header block
+        described by :meth:`column_header_map`.
+
+        ``path`` is the tuple of label values from the outermost to the
+        innermost header; ``path_origins`` is the parallel tuple of
+        ``(rowx, colx)`` anchor coordinates.
+        """
+        header_map = self.column_header_map(
+            header_rows, colx_range=colx_range,
+            include_hidden=include_hidden,
+        )
+        return header_map.paths()
+
+    def locate_column_path(self, path, header_rows, colx_range=None,
+                           include_hidden=True, prefix=False):
+        """
+        Reverse-lookup a column by its header path.
+
+        Returns a :class:`~xlrd.header.HeaderMatch`; use
+        :attr:`~xlrd.header.HeaderMatch.unique` and
+        :attr:`~xlrd.header.HeaderMatch.column` for a single hit, or inspect
+        :attr:`~xlrd.header.HeaderMatch.columns` and
+        :attr:`~xlrd.header.HeaderMatch.region` when the path is one-to-many.
+        Same-named independent cells are never collapsed to the first hit.
+        """
+        header_map = self.column_header_map(
+            header_rows, colx_range=colx_range,
+            include_hidden=include_hidden,
+        )
+        return header_map.locate(path, prefix=prefix)
+
     def handle_hlink(self, data):
         # DEBUG = 1
         if DEBUG: print("\n=== hyperlink ===", file=self.logfile)
