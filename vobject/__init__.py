@@ -76,7 +76,7 @@ VObject Overview
 
 """
 
-from . import icalendar, vcard
+from . import dial, icalendar, vcard
 from .base import newFromBehavior, readComponents, readOne
 
 # Package version

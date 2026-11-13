@@ -311,3 +311,40 @@ vCards objects.
 >>> vobject.readComponents(vCardStream).next().email.value
 'jeffrey@osafoundation.org'
 ```
+
+#### Exporting PBX dial sequences
+
+`vobject.dial` turns TEL properties into complete dial strings for lines
+that can only dial a full sequence. PBX rules are supplied by the caller
+through `PbxRules`: the outside line prefix, the extension lengths in
+use, the area codes that may be omitted on site, and the characters used
+for pause and wait.
+
+```
+>>> import io
+>>> from vobject.dial import PbxRules, export_dial_sequences
+>>> card = vobject.readOne(io.StringIO(
+...     "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Reception\r\n"
+...     "work.TEL:+1-617-555-0100\r\n"
+...     "work.X-EXTENSION:1234\r\nEND:VCARD\r\n"))
+>>> rules = PbxRules(outside_prefix="9", extension_lengths=(4,),
+...                  home_country_code="1", local_area_codes=("617",))
+>>> export = export_dial_sequences(card, rules)
+>>> export.is_clear
+True
+>>> export.sequences[0].sequence
+'95550100p1234'
+```
+
+Extensions are taken from explicit, disambiguated sources: the tel URI
+`ext` parameter (RFC 6350), a TEL `EXT` parameter, a trailing `ext`/`x`
+marker, or an `X-` property in the same group as the TEL line. Pause and
+wait markers (RFC 4734 `postd`, comma/p and semicolon/w) delimit the
+post-dial part and are never counted as number digits.
+
+When a run of digits could be either the tail of a subscriber number or
+an extension and nothing on the card disambiguates it, both
+interpretations are materialized. Identical dial strings collapse into
+one `DialSequence`; conflicting strings are returned in
+`DialExport.ambiguities` as `AmbiguousDial` items, each carrying the two
+strings and the field sources behind them, for manual review.
