@@ -1,5 +1,12 @@
 import random
-from collections.abc import Callable, Iterator, MutableMapping, Sequence
+from collections.abc import (
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+    MutableMapping,
+    Sequence,
+)
 from contextlib import AbstractContextManager
 from typing import (
     Any,
@@ -19,6 +26,9 @@ __all__: Final = (
     "Cache",
     "CacheInfo",
     "FIFOCache",
+    "GroupCache",
+    "GroupMiss",
+    "GroupSnapshot",
     "LFUCache",
     "LRUCache",
     "RRCache",
@@ -138,6 +148,29 @@ class TLRUCache(_TimedCache[_KT, _VT, _TT]):
     @property
     def ttu(self) -> Callable[[_KT, _VT, _TT], _TT]: ...
     def expire(self, time: _TT | None = None) -> list[tuple[_KT, _VT]]: ...
+
+class GroupMiss(KeyError):
+    group: Any
+    missing: frozenset[Any]
+    def __init__(self, group: Any, missing: Iterable[Any]) -> None: ...
+
+class GroupSnapshot(Mapping[_KT, _VT]):
+    @property
+    def group(self) -> Any: ...
+    @property
+    def manifest(self) -> dict[_KT, Any]: ...
+    @property
+    def closed(self) -> bool: ...
+    def close(self) -> None: ...
+    def __enter__(self) -> GroupSnapshot[_KT, _VT]: ...
+    def __exit__(self, *exc: object) -> None: ...
+
+class GroupCache(LRUCache[_KT, _VT]):
+    def publish(
+        self, group: Any, manifest: Mapping[Any, Any], values: Mapping[Any, _VT]
+    ) -> None: ...
+    def manifest(self, group: Any) -> dict[Any, Any]: ...
+    def snapshot(self, group: Any) -> GroupSnapshot[Any, _VT]: ...
 
 class CacheInfo(NamedTuple):
     hits: int

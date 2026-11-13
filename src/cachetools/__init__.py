@@ -4,6 +4,9 @@ __all__ = (
     "Cache",
     "CacheInfo",
     "FIFOCache",
+    "GroupCache",
+    "GroupMiss",
+    "GroupSnapshot",
     "LFUCache",
     "LRUCache",
     "RRCache",
@@ -739,6 +742,202 @@ class TLRUCache(_TimedCache):
             pass
         else:
             cache_delitem(self, key)
+
+
+class GroupMiss(KeyError):
+    """Raised when a published group manifest cannot be fully assembled."""
+
+    def __init__(self, group, missing):
+        super().__init__(group)
+        self.group = group
+        self.missing = frozenset(missing)
+
+    def __str__(self):
+        return "%r: missing shards: %s" % (
+            self.group,
+            ", ".join(sorted(map(repr, self.missing))),
+        )
+
+
+class GroupSnapshot(collections.abc.Mapping):
+    """Consistent read-only view of a group's published shard values."""
+
+    def __init__(self, group, manifest, values, release):
+        self.__group = group
+        self.__manifest = manifest
+        self.__values = values
+        self.__release = release
+
+    def __repr__(self):
+        return "%s(group=%r, manifest=%r)" % (
+            type(self).__name__,
+            self.__group,
+            self.__manifest,
+        )
+
+    def __getitem__(self, member):
+        return self.__values[member]
+
+    def __iter__(self):
+        return iter(self.__values)
+
+    def __len__(self):
+        return len(self.__values)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    @property
+    def group(self):
+        """The group this snapshot was taken from."""
+        return self.__group
+
+    @property
+    def manifest(self):
+        """The published manifest this snapshot is based on."""
+        return dict(self.__manifest)
+
+    @property
+    def closed(self):
+        """Whether this snapshot has been closed."""
+        return self.__release is None
+
+    def close(self):
+        """Release this snapshot's hold on its shard values."""
+        release = self.__release
+        if release is not None:
+            self.__release = None
+            release()
+
+
+class GroupCache(LRUCache):
+    """LRU cache implementation with consistent group reads.
+
+    A publisher stores related items as a named *group* by calling
+    :meth:`publish` with a *manifest* mapping each group member to a
+    token identifying its shard value, and the new shard *values*
+    keyed by token.  Members that did not change keep their old
+    token, so their cached values are reused.  A reader calls
+    :meth:`snapshot` to retrieve the complete set of shard values of
+    one published manifest as a :class:`GroupSnapshot`.
+
+    """
+
+    __VALUE = "value"
+
+    def __init__(self, maxsize, getsizeof=None):
+        LRUCache.__init__(self, maxsize, getsizeof)
+        self.__manifests = {}
+        self.__pins = {}
+
+    def publish(self, group, manifest, values):
+        """Store new shard values and atomically publish a manifest.
+
+        `manifest` must be a mapping of group members to tokens, and
+        `values` a mapping of tokens to the shard values to store.
+        Every token referenced by `manifest` must either be present
+        in `values` or already cached from an earlier publish.
+
+        """
+        if not isinstance(manifest, collections.abc.Mapping):
+            raise TypeError("manifest must be a mapping") from None
+        if not isinstance(values, collections.abc.Mapping):
+            raise TypeError("values must be a mapping") from None
+        tokens = set(manifest.values())
+        missing = [
+            token
+            for token in tokens
+            if token not in values and (self.__VALUE, group, token) not in self
+        ]
+        if missing:
+            raise ValueError("missing values for tokens: %r" % missing)
+        # reclaim this group's superseded shard values, unless they
+        # are still pinned by an open snapshot
+        old = self.__manifests.get(group)
+        if old is not None:
+            pins = self.__pins
+            for token in set(old.values()) - tokens:
+                key = (self.__VALUE, group, token)
+                if key not in pins:
+                    self.pop(key, None)
+        for token, value in values.items():
+            self[(self.__VALUE, group, token)] = value
+        for token in tokens:
+            key = (self.__VALUE, group, token)
+            if key not in self:
+                raise ValueError("group %r does not fit in cache" % (group,))
+            self[key]  # mark as recently used
+        self.__manifests[group] = dict(manifest)
+
+    def manifest(self, group):
+        """Return the currently published manifest for `group`."""
+        return dict(self.__manifests[group])
+
+    def snapshot(self, group):
+        """Return a :class:`GroupSnapshot` of the published manifest.
+
+        The snapshot's shard values are pinned and will not be
+        evicted until the snapshot is closed.  Raises
+        :exc:`KeyError` if no manifest has been published for
+        `group`, and :class:`GroupMiss` if shard values of the
+        published manifest are no longer cached.
+
+        """
+        manifest = dict(self.__manifests[group])
+        pins = self.__pins
+        keys = {}
+        for member, token in manifest.items():
+            key = (self.__VALUE, group, token)
+            keys[member] = key
+            pins[key] = pins.get(key, 0) + 1
+        values = {}
+        missing = []
+        for member, key in keys.items():
+            try:
+                values[member] = self[key]
+            except KeyError:
+                missing.append(member)
+        if missing:
+            self.__release(keys.values())
+            raise GroupMiss(group, missing)
+        release = functools.partial(self.__release, tuple(keys.values()))
+        return GroupSnapshot(group, manifest, values, release)
+
+    def popitem(self):
+        """Remove and return the `(key, value)` pair least recently used.
+
+        Items pinned by an open :class:`GroupSnapshot` are skipped
+        and marked as recently used instead.  Raises
+        :exc:`KeyError` if all remaining items are pinned.
+
+        """
+        seen = set()
+        while True:
+            key, value = LRUCache.popitem(self)
+            if key not in self.__pins:
+                return key, value
+            if key in seen:
+                self[key] = value
+                raise KeyError("all cache items are pinned")
+            seen.add(key)
+            self[key] = value
+
+    def clear(self):
+        """Remove all items and all published manifests."""
+        LRUCache.clear(self)
+        self.__manifests.clear()
+
+    def __release(self, keys):
+        pins = self.__pins
+        for key in keys:
+            count = pins[key] - 1
+            if count > 0:
+                pins[key] = count
+            else:
+                del pins[key]
 
 
 class CacheInfo(collections.namedtuple("CacheInfo", "hits misses maxsize currsize")):

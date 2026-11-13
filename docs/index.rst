@@ -21,7 +21,7 @@ method calls.
 
 .. testsetup:: *
 
-   from cachetools import cached, cachedmethod, LRUCache, TLRUCache, TTLCache
+   from cachetools import cached, cachedmethod, GroupCache, LRUCache, TLRUCache, TTLCache
 
    from unittest import mock
    urllib = mock.MagicMock()
@@ -223,6 +223,88 @@ inserted into the cache.
       returned by :attr:`timer`.
 
       :returns: An iterable of expired `(key, value)` pairs.
+
+
+.. autoclass:: GroupCache(maxsize, getsizeof=None)
+   :members: clear, manifest, popitem, publish, snapshot
+
+   This class stores related items as named *groups* that readers
+   can retrieve consistently.  A publisher updates a group in two
+   steps:  :meth:`GroupCache.publish` first stores new *shard* values
+   under caller-chosen *tokens*, then atomically publishes a
+   *manifest* mapping each group member to its token.  Members whose
+   values did not change keep their old token, so their cached
+   values are reused.  Shard values of the same group that are no
+   longer referenced by the new manifest are discarded, unless they
+   are still pinned by an open snapshot.  Readers call
+   :meth:`GroupCache.snapshot` to obtain a :class:`GroupSnapshot`
+   with the complete set of shard values of one published manifest.  Since each shard version is
+   stored under its own token, a reader never observes a mixture of
+   values from different manifests, even if recomputing a single
+   shard interleaves with a query:
+
+   .. testcode::
+
+      cache = GroupCache(maxsize=16)
+
+      # publish a daily report consisting of three shards
+      cache.publish('report', {'a': 1, 'b': 1, 'c': 1}, {1: 10})
+
+      # recompute shard 'b' only; 'a' and 'c' reuse their old values
+      cache.publish('report', {'a': 1, 'b': 2, 'c': 1}, {2: 25})
+
+      with cache.snapshot('report') as snap:
+          total = sum(snap.values())
+
+      print(total)
+      print(dict(snap))
+
+   .. testoutput::
+
+      45
+      {'a': 10, 'b': 25, 'c': 10}
+
+   A snapshot holds its shard values in memory and also *pins* the
+   corresponding cache items:  as long as a snapshot is open,
+   :meth:`popitem` will not evict them, so a reader that is still
+   using an older manifest cannot have its values removed to make
+   space for new ones.  Snapshots should therefore be closed
+   promptly, preferably by using them as context managers.  If all
+   remaining items are pinned by open snapshots, :meth:`popitem`
+   raises :exc:`KeyError`, which will also cause
+   :meth:`~GroupCache.publish` to fail.
+
+   If a shard value referenced by the published manifest has been
+   evicted, :meth:`~GroupCache.snapshot` raises :class:`GroupMiss`
+   instead of returning an incomplete result.  If no manifest has
+   been published for a group at all, :exc:`KeyError` is raised.
+
+   Note that manifests are kept as metadata and are not subject to
+   cache eviction or `getsizeof`;  :meth:`clear` removes them along
+   with the cache contents.
+
+   .. versionadded:: 8.0
+
+.. autoclass:: GroupSnapshot
+   :members: close, closed, group, manifest
+
+   An immutable mapping of a group's members to their shard values,
+   as returned by :meth:`GroupCache.snapshot`.  All values belong to
+   a single published manifest.  Closing the snapshot releases its
+   hold on the cached shard values;  the values themselves remain
+   readable afterwards.
+
+   .. versionadded:: 8.0
+
+.. autoclass:: GroupMiss
+
+   A :exc:`KeyError` subclass raised by :meth:`GroupCache.snapshot`
+   when shard values of the published manifest are no longer
+   cached.  The :attr:`group` attribute holds the group and the
+   :attr:`missing` attribute the set of members whose shard values
+   are missing.
+
+   .. versionadded:: 8.0
 
 
 Extending cache classes
