@@ -15,6 +15,14 @@ from .formatter import (
     FORMAT_RSS,
     FORMAT_W3C,
 )
+from .infer import (
+    Anchor,
+    ColumnRelation,
+    FormatInferer,
+    InferenceResult,
+    Interpretation,
+    RowDecision,
+)
 from .parser import ParserError
 
 # https://mypy.readthedocs.io/en/stable/command_line.html#cmdoption-mypy-no-implicit-reexport
@@ -37,5 +45,11 @@ __all__ = [
     "FORMAT_RFC3339_STRICT",
     "FORMAT_RSS",
     "FORMAT_W3C",
+    "Anchor",
+    "ColumnRelation",
+    "FormatInferer",
+    "InferenceResult",
+    "Interpretation",
+    "RowDecision",
     "ParserError",
 ]
