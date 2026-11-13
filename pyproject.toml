@@ -48,6 +48,7 @@ issues = "https://github.com/py-vobject/vobject/issues"
 [project.scripts]
 ics_diff = "vobject.ics_diff:main"
 change_tz = "vobject.change_tz:main"
+directory_merge = "vobject.directory_merge:main"
 
 [project.optional-dependencies]
 dev = [
