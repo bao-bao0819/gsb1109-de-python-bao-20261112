@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+ - `ScaleTable`, a source-attributed calibration table that keeps each contribution tied to its source and supports retracting a single segment (or the whole contribution) of a single source.
+ - `EffectiveValue`, `Change`, and `Reconciliation` to expose the effective calibration with its supporting sources and to distinguish value changes, evidence-only changes, and conflict recovery.
+ - Reconciliation kind constants: `NEW_COVERAGE`, `COVERAGE_LOST`, `VALUE_CHANGED`, `EVIDENCE_GAINED`, `EVIDENCE_LOST`, `CONFLICT_EMERGED`, and `CONFLICT_RESOLVED`.
+
 ## 2.6.3 (2026-09-29)
 
 ### Fixed

@@ -39,6 +39,7 @@ In particular, it provides the following features:
       * [Interval transformation](#interval-transformation)
       * [Discrete iteration](#discrete-iteration)
       * [Map intervals to data](#map-intervals-to-data)
+      * [Source-attributed calibration tables](#source-attributed-calibration-tables)
       * [Import & export intervals to strings](#import--export-intervals-to-strings)
       * [Import & export intervals to Python built-in data types](#import--export-intervals-to-python-built-in-data-types)
       * [Specialize & customize intervals](#specialize--customize-intervals)
@@ -711,6 +712,102 @@ While `.combine` accepts a single `IntervalDict`, it can be generalized to suppo
 Finally, similarly to a `dict`, an `IntervalDict` also supports `len`, `in` and `del`, and defines `.clear`, `.copy`, `.update`, `.pop`, `.popitem`, and `.setdefault`.
 For convenience, one can export the content of an `IntervalDict` to a classical Python `dict` using the `as_dict` method. This method accepts an optional `atomic` parameter (whose default is `False`).
 When set to `True`, the keys of the resulting `dict` instance are atomic intervals.
+
+
+[&uparrow; back to top](#table-of-contents)
+### Source-attributed calibration tables
+
+A `ScaleTable` stores calibration contributions together with their *source* (e.g. a sensor). Contributions are never silently merged: when two sources report the same corrected value on the same segment, both remain visible as independent pieces of evidence that can be queried and retracted separately.
+
+```python
+>>> table = P.ScaleTable()
+>>> _ = table.contribute("sensor-1", P.closed(0, 10), 1.0)
+>>> _ = table.contribute("sensor-2", P.closed(0, 10), 1.0)
+>>> _ = table.contribute("sensor-3", P.closed(8, 10), 2.0)
+
+>>> table.effective()
+[([0,8), EffectiveValue(value=1.0, sources=('sensor-1', 'sensor-2'), conflicting=False, values=(1.0,))), ([8,10], EffectiveValue(value=None, sources=('sensor-1', 'sensor-2', 'sensor-3'), conflicting=True, values=(1.0, 2.0)))]
+
+```
+
+The first two sensors agree, so the segment `[0,8)` has a unique value supported by both sources. The third sensor only disagrees on the endpoint segment `[8,10]`: instead of letting one source win, the value is left undefined (`None`) and the conflict is exposed. The raw, per-source evidence is always available:
+
+```python
+>>> table.evidence()
+[('sensor-1', [0,10], 1.0), ('sensor-2', [0,10], 1.0), ('sensor-3', [8,10], 2.0)]
+
+```
+
+A single segment of a single source can be withdrawn. The returned `Reconciliation` explains how the *effective* calibration changes:
+
+```python
+>>> result = table.retract("sensor-3", P.closed(8, 9))
+>>> [change.kind for change in result]
+['conflict_resolved']
+>>> result.conflict_resolved[0].interval
+[8,9]
+>>> table.effective_at(9).sources
+('sensor-1', 'sensor-2')
+
+```
+
+Three domain-level situations are distinguished: the final value changed (`value_changed`), the value is unchanged but supporting evidence disappeared (`evidence_lost`), and a conflict recovers into a unique value (`conflict_resolved`).
+
+```python
+>>> t = P.ScaleTable()
+>>> _ = t.contribute("a", P.closed(0, 4), 1.0)
+>>> [change.kind for change in t.contribute("a", P.closed(0, 4), 9.0)]
+['value_changed']
+
+>>> t = P.ScaleTable()
+>>> _ = t.contribute("a", P.closed(0, 4), 1.0)
+>>> _ = t.contribute("b", P.closed(0, 4), 1.0)
+>>> [change.kind for change in t.retract("b")]
+['evidence_lost']
+
+>>> t = P.ScaleTable()
+>>> _ = t.contribute("a", P.closed(0, 4), 1.0)
+>>> _ = t.contribute("b", P.closed(0, 4), 2.0)
+>>> [change.kind for change in t.retract("b")]
+['conflict_resolved']
+
+```
+
+Two adjacent segments may carry the same continuous value while resting on different evidence; they stay distinguishable and can be queried independently:
+
+```python
+>>> t = P.ScaleTable()
+>>> _ = t.contribute("a", P.closed(0, 10), 7.0)
+>>> _ = t.contribute("b", P.closed(5, 10), 7.0)
+>>> [segment for segment, _ in t.effective()]
+[[0,5), [5,10]]
+>>> t.effective_at(3).sources
+('a',)
+>>> t.effective_at(6).sources
+('a', 'b')
+
+```
+
+Finally, retracting a source in several steps is equivalent to retracting its whole contribution at once: both paths converge on the same effective scale and the same remaining evidence.
+
+```python
+>>> def build():
+...     table = P.ScaleTable()
+...     _ = table.contribute("sensor-1", P.closed(0, 10), 1.0)
+...     _ = table.contribute("sensor-2", P.closed(0, 10), 1.0)
+...     _ = table.contribute("sensor-3", P.closed(8, 10), 2.0)
+...     return table
+>>> split = build()
+>>> _ = split.retract("sensor-3", P.closed(8, 9))
+>>> _ = split.retract("sensor-3", P.closed(9, 10))
+>>> whole = build()
+>>> _ = whole.retract("sensor-3")
+>>> split.effective() == whole.effective()
+True
+>>> split.evidence() == whole.evidence()
+True
+
+```
 
 
 [&uparrow; back to top](#table-of-contents)
