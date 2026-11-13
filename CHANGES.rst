@@ -4,6 +4,18 @@ Change Log
 Unreleased
 ----------
 
+Adds:
+
+- Adds a `check_report()` function that checks whether three rounded report
+  rows (A, B and A - B), each with its own nominal value, parenthesized
+  uncertainty and display precision, can come from one pair of measurements.
+  The feasible rounding intervals are reconstructed from the last printed
+  digit using a selectable half-even or half-up rule, the required error
+  correlation coefficient is checked against the legal [-1, 1] range, and a
+  compatible report returns witness values that reformat back to every
+  original row. Rows that only hold on a half-unit boundary that rounds away
+  from a printed digit are reported as boundary-only.
+
 Changes:
 
 - Updates test configuration to run against python versions `3.11` through `3.15`. Previously tests ran against python

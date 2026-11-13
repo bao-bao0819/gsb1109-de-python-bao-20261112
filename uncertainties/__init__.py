@@ -224,6 +224,18 @@ This software is released under the BSD license.
 from .core import *  # noqa
 from .core import __all__  # noqa For a correct help(uncertainties)
 
+# Consistency checks for rounded measurement reports:
+from .report import (  # noqa
+    HALF_EVEN,
+    HALF_UP,
+    Interval,
+    ReportConsistency,
+    ReportRow,
+    check_report,
+    parse_report_row,
+    rounding_interval,
+)
+
 from .version import __version__, __version_tuple__  # noqa
 
 # for backward compatibility

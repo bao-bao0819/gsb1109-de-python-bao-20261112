@@ -659,6 +659,79 @@ variables:
 These values are obtained with a :ref:`fast differentiation algorithm
 <differentiation method>`.
 
+.. index::
+   pair: rounded report; consistency check
+   pair: correlation coefficient; legal range
+
+Consistency of rounded reports
+==============================
+
+An old report may only keep three rounded rows, for A, B and A-B, each
+printing a nominal value and a parenthesized uncertainty with its own
+display precision::
+
+    A = 10.00(50)
+    B = 3.00(20)
+    A - B = 7.0(5)
+
+Because the rows are rounded, the underlying measurements can only take
+values inside the intervals defined by the last printed digits.  The
+:func:`check_report` function reconstructs these feasible intervals and
+checks whether one pair of measurements can reproduce all three rows.
+Two conditions must hold together:
+
+1. the nominal values must satisfy A - B;
+2. the standard deviations must admit an error correlation coefficient
+   in the legal range [-1, 1], since for C = A - B
+
+   .. math::
+
+      \\sigma_C^2 = \\sigma_A^2 + \\sigma_B^2
+      - 2\\rho\\sigma_A\\sigma_B.
+
+A compatible report returns a witness pair of measurements and strings
+that reformat back to every original row:
+
+>>> from uncertainties import check_report
+>>> result = check_report("10.00(50)", "3.00(20)", "7.0(5)")
+>>> result.consistent
+True
+>>> result.rho  # Required correlation coefficient
+0.2
+>>> result.formatted
+['10.00(50)', '3.00(20)', '7.0(5)']
+
+The reconstructed intervals are available for inspection.  They are
+half-open at half-unit rounding boundaries, because the default rule is
+half-even rounding (the rule used by Python's ``round()``):
+
+>>> print(result.intervals["A"]["nominal"])
+[9.995, 10.005]
+
+Rows that cannot be produced by any legal pair are reported as
+inconsistent:
+
+>>> impossible = check_report("10.00(50)", "3.00(20)", "7.0(9)")
+>>> impossible.consistent
+False
+>>> impossible.boundary_only
+False
+
+When the rows only meet on a half-unit boundary that rounds *away* from
+a printed digit, the actual rounding direction is recorded instead of
+silently accepting the tie:
+
+>>> boundary = check_report("1.0(1)", "0.0(1)", "1.1(2)")
+>>> boundary.consistent
+False
+>>> boundary.boundary_only
+True
+
+The ``rounding_rule`` argument selects how ties are handled:
+``"half-even"`` (the default) or ``"half-up"``.  Individual rows can be
+parsed first with :func:`parse_report_row`, and the interval of one
+printed value is given by :func:`rounding_interval`.
+
 Additional information
 ======================
 
