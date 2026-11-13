@@ -7,6 +7,12 @@ __description__ = """Powerful and Lightweight Python Tree Data Structure."""
 __url__ = "https://github.com/c0fec0de/anytree"
 
 from . import cachedsearch, util
+from .disclosure import (
+    DisclosureBounds,
+    DisclosureConflictError,
+    disclosure_bounds,
+    disclosure_group_bounds,
+)
 from .iterators import LevelOrderGroupIter, LevelOrderIter, PostOrderIter, PreOrderIter, ZigZagGroupIter
 from .node import AnyNode, LightNodeMixin, LoopError, Node, NodeMixin, SymlinkNode, SymlinkNodeMixin, TreeError
 from .render import AbstractStyle, AsciiStyle, ContRoundStyle, ContStyle, DoubleStyle, RenderTree
@@ -26,6 +32,8 @@ __all__ = [
     "ContRoundStyle",
     "ContStyle",
     "CountError",
+    "DisclosureBounds",
+    "DisclosureConflictError",
     "DoubleStyle",
     "LevelGroupOrderIter",
     "LevelOrderGroupIter",
@@ -47,6 +55,8 @@ __all__ = [
     "Walker",
     "ZigZagGroupIter",
     "cachedsearch",
+    "disclosure_bounds",
+    "disclosure_group_bounds",
     "find",
     "find_by_attr",
     "findall",

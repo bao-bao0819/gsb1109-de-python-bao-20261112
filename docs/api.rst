@@ -6,6 +6,7 @@ API
 
     api/anytree.node
     api/anytree.iterators
+    api/anytree.disclosure
     api/anytree.render
     api/anytree.search
     api/anytree.cachedsearch
