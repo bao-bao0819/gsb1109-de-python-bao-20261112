@@ -21,7 +21,7 @@ method calls.
 
 .. testsetup:: *
 
-   from cachetools import cached, cachedmethod, LRUCache, TLRUCache, TTLCache
+   from cachetools import cached, cachedmethod, DependencyCache, LRUCache, TLRUCache, TTLCache
 
    from unittest import mock
    urllib = mock.MagicMock()
@@ -223,6 +223,62 @@ inserted into the cache.
       returned by :attr:`timer`.
 
       :returns: An iterable of expired `(key, value)` pairs.
+
+.. autoclass:: DependencyCache(maxsize, getsizeof=None)
+   :members: compute, dependencies, revise
+
+   This class caches items that are computed from other items in the
+   same cache, e.g. features derived from common source columns.
+   When an item is computed by :meth:`compute`, the cache keys read
+   during its computation are recorded as the item's dependencies.
+   Since the keys actually read are recorded, computations taking
+   different branches, e.g. in peak and off-peak season, record
+   different dependencies, and a successful recomputation replaces
+   the previously recorded dependencies with the keys read during
+   the latest computation.
+
+   Calling :meth:`revise` with one or more source keys invalidates
+   these keys and all items that directly or transitively depend on
+   them, so they will be recomputed from the revised sources on
+   their next access.
+
+   .. doctest::
+
+      >>> cache = DependencyCache(maxsize=10)
+      >>> cache['sales'] = 100
+      >>> cache.compute('double_sales', lambda: cache['sales'] * 2)
+      200
+      >>> sorted(cache.dependencies('double_sales'))
+      ['sales']
+      >>> sorted(cache.revise('sales'))
+      ['double_sales', 'sales']
+      >>> 'double_sales' in cache
+      False
+
+   Dependency records are kept independently of the cached values:
+   they are replaced only by a successful recomputation and are
+   discarded by :meth:`clear`, so a failed recomputation does not
+   erase the dependencies recorded by the last successful one, and
+   invalidation remains transitive through items whose values have
+   been evicted.
+
+   :meth:`compute` also serializes concurrent computations of the
+   same key:  while one thread is computing a key, other threads
+   computing the same key wait for the pending computation to finish
+   and then return its cached value, or compute it themselves if the
+   pending computation failed.  Computations of unrelated keys are
+   not affected and may proceed concurrently.  If waiting would
+   result in a deadlock, i.e. the pending computation transitively
+   waits for a key computed by the current thread, a
+   :exc:`CyclicDependencyError` is raised instead, and its
+   :attr:`~CyclicDependencyError.keys` attribute names the cache
+   keys participating in the cycle.
+
+.. autoexception:: CyclicDependencyError
+
+   .. attribute:: keys
+
+      A tuple of the cache keys participating in the detected cycle.
 
 
 Extending cache classes

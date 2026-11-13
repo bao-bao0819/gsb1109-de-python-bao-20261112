@@ -1,5 +1,5 @@
 import random
-from collections.abc import Callable, Iterator, MutableMapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, MutableMapping, Sequence
 from contextlib import AbstractContextManager
 from typing import (
     Any,
@@ -18,6 +18,8 @@ from typing import (
 __all__: Final = (
     "Cache",
     "CacheInfo",
+    "CyclicDependencyError",
+    "DependencyCache",
     "FIFOCache",
     "LFUCache",
     "LRUCache",
@@ -138,6 +140,17 @@ class TLRUCache(_TimedCache[_KT, _VT, _TT]):
     @property
     def ttu(self) -> Callable[[_KT, _VT, _TT], _TT]: ...
     def expire(self, time: _TT | None = None) -> list[tuple[_KT, _VT]]: ...
+
+class CyclicDependencyError(RuntimeError):
+    keys: tuple[Any, ...]
+    def __init__(self, keys: Iterable[Any]) -> None: ...
+
+class DependencyCache(Cache[_KT, _VT]):
+    def __getitem__(self, key: _KT) -> _VT: ...
+    def clear(self) -> None: ...
+    def compute(self, key: _KT, func: Callable[[], _VT]) -> _VT: ...
+    def dependencies(self, key: _KT) -> frozenset[_KT]: ...
+    def revise(self, *keys: _KT) -> set[_KT]: ...
 
 class CacheInfo(NamedTuple):
     hits: int

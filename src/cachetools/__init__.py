@@ -3,6 +3,8 @@
 __all__ = (
     "Cache",
     "CacheInfo",
+    "CyclicDependencyError",
+    "DependencyCache",
     "FIFOCache",
     "LFUCache",
     "LRUCache",
@@ -20,6 +22,7 @@ import collections.abc
 import functools
 import heapq
 import random
+import threading
 import time
 
 from . import keys
@@ -739,6 +742,192 @@ class TLRUCache(_TimedCache):
             pass
         else:
             cache_delitem(self, key)
+
+
+class CyclicDependencyError(RuntimeError):
+    """Error raised when a cyclic dependency between computations is
+    detected.
+
+    """
+
+    def __init__(self, keys):
+        self.keys = tuple(keys)
+        super().__init__(
+            "cyclic dependency detected: " + ", ".join(map(repr, self.keys))
+        )
+
+
+class DependencyCache(Cache):
+    """Cache tracking dependencies between computed items.
+
+    Items computed by :meth:`compute` record the cache keys read during
+    their computation as dependencies, which :meth:`revise` uses to
+    invalidate dependent items when a source key is revised.
+
+    """
+
+    def __init__(self, maxsize, getsizeof=None):
+        Cache.__init__(self, maxsize, getsizeof)
+        self.__condition = threading.Condition()
+        self.__deps = {}
+        self.__pending = {}
+        self.__waiting = {}
+        self.__local = threading.local()
+
+    def __getitem__(self, key, cache_getitem=Cache.__getitem__):
+        value = cache_getitem(self, key)
+        self.__record(key)
+        return value
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # synchronization and in-flight computation state is not picklable
+        del state["_DependencyCache__condition"]
+        del state["_DependencyCache__local"]
+        del state["_DependencyCache__pending"]
+        del state["_DependencyCache__waiting"]
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.__condition = threading.Condition()
+        self.__local = threading.local()
+        self.__pending = {}
+        self.__waiting = {}
+
+    def clear(self):
+        with self.__condition:
+            Cache.clear(self)
+            self.__deps.clear()
+
+    def compute(self, key, func):
+        """Return the cached value for `key`, or compute and store it.
+
+        If `key` is not cached, call `func()` and store its result.
+        Cache keys read from this cache during the call, either via
+        :meth:`__getitem__` or nested :meth:`compute` calls, are
+        recorded as the item's dependencies, replacing the dependencies
+        of its previous computation.  If `func()` raises an exception,
+        nothing is stored and the previously recorded dependencies are
+        left unchanged.
+
+        While one thread is computing `key`, other threads computing
+        the same key wait for the pending computation to finish and
+        then return its cached value, or compute it themselves if the
+        pending computation failed.  If waiting would result in a
+        deadlock, i.e. the pending computation transitively waits for a
+        key computed by the current thread, a
+        :exc:`CyclicDependencyError` is raised instead.
+
+        """
+        self.__record(key)
+        with self.__condition:
+            try:
+                return self[key]
+            except KeyError:
+                pass  # key not found
+            ident = threading.get_ident()
+            pending = self.__pending
+            waiting = self.__waiting
+            while True:
+                owner = pending.get(key)
+                if owner is None:
+                    break
+                if owner == ident:
+                    chain = [
+                        candidate
+                        for candidate, candidate_owner in pending.items()
+                        if candidate_owner == ident
+                    ]
+                    raise CyclicDependencyError(chain + [key])
+                # detect a wait-for cycle before going to sleep
+                cycle = [key]
+                thread = owner
+                while thread != ident:
+                    waited = waiting.get(thread)
+                    if waited is None:
+                        cycle = None
+                        break
+                    cycle.append(waited[0])
+                    thread = waited[1]
+                if cycle is not None:
+                    raise CyclicDependencyError(cycle)
+                waiting[ident] = (key, owner)
+                try:
+                    self.__condition.wait()
+                finally:
+                    del waiting[ident]
+                try:
+                    return self[key]
+                except KeyError:
+                    pass  # owner's computation failed; compute it ourselves
+            pending[key] = ident
+        reads = set()
+        stack = getattr(self.__local, "reads", None)
+        if stack is None:
+            stack = self.__local.reads = []
+        stack.append(reads)
+        try:
+            try:
+                value = func()
+            finally:
+                stack.pop()
+            with self.__condition:
+                try:
+                    self[key] = value
+                except ValueError:
+                    pass  # value too large; keep previous dependencies
+                else:
+                    reads.discard(key)
+                    self.__deps[key] = frozenset(reads)
+            return value
+        finally:
+            with self.__condition:
+                del pending[key]
+                self.__condition.notify_all()
+
+    def dependencies(self, key):
+        """Return the cache keys read during the last successful
+        computation of `key`, or an empty frozenset if `key` was never
+        successfully computed.
+
+        """
+        with self.__condition:
+            return self.__deps.get(key, frozenset())
+
+    def revise(self, *keys):
+        """Invalidate `keys` and all items depending on them.
+
+        Remove the revised source keys and every cached item that
+        directly or transitively depends on one of them, so these items
+        will be recomputed from the revised sources on their next
+        access.  Dependency records are kept, so invalidation remains
+        transitive through items whose values have been evicted, and a
+        failed recomputation does not erase previously recorded
+        dependencies.  Computations in progress are not affected.
+
+        Return the set of invalidated keys, including the revised keys
+        themselves.
+
+        """
+        with self.__condition:
+            invalidated = set(keys)
+            queue = list(keys)
+            while queue:
+                source = queue.pop()
+                for key, deps in self.__deps.items():
+                    if key not in invalidated and source in deps:
+                        invalidated.add(key)
+                        queue.append(key)
+            for key in invalidated:
+                if key in self:
+                    del self[key]
+            return invalidated
+
+    def __record(self, key):
+        stack = getattr(self.__local, "reads", None)
+        if stack:
+            stack[-1].add(key)
 
 
 class CacheInfo(collections.namedtuple("CacheInfo", "hits misses maxsize currsize")):
