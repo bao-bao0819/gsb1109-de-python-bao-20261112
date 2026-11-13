@@ -1,6 +1,11 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+- [ADDED] Added ``Arrow.reverse_shift()`` to invert a sequence of ordered relative shifts over a bounded source interval, returning every source datetime range that lands on a target day, with correct month-end clamping and DST fold/imaginary-time handling.
+
 1.4.0 (2025-10-18)
 ------------------
 

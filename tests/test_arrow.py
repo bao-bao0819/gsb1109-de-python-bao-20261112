@@ -897,6 +897,365 @@ class TestArrowShift:
         )
 
 
+def _brute_force_reverse(
+    target, start, end, shifts, fold=None, check_imaginary=True, step_seconds=1
+):
+    """Reference replay of the shifts across the source interval at a fixed step."""
+    tzinfo = target.tzinfo
+    target_date = target.date()
+    matches = []
+    current = start
+    while current <= end:
+        result = current
+        for rule in shifts:
+            result = result.shift(check_imaginary=check_imaginary, **rule)
+        result = result.to(tzinfo)
+        if result.date() == target_date and (
+            fold is None or getattr(result.datetime, "fold", 0) == fold
+        ):
+            matches.append(current)
+        current = current.shift(seconds=step_seconds)
+    return matches
+
+
+class TestArrowReverseShift:
+    def _assert_equivalent(
+        self, target, start, end, shifts, fold=None, brute_step_seconds=1
+    ):
+        segments = arrow.Arrow.reverse_shift(
+            target, start, end, shifts, fold=fold
+        )
+
+        def matches(source):
+            result = source
+            for rule in shifts:
+                result = result.shift(**rule)
+            result = result.to(target.tzinfo)
+            if result.date() != target.date():
+                return False
+            return fold is None or getattr(result.datetime, "fold", 0) == fold
+
+        def instant_neighbor(source, microseconds):
+            # Real elapsed-time neighbour; wall .shift() misbehaves across zones
+            # that delete a whole calendar day (e.g. Pacific/Apia, 2011-12-30).
+            utc_neighbor = source.to(timezone.utc).datetime + timedelta(
+                microseconds=microseconds
+            )
+            return arrow.Arrow.fromdatetime(
+                utc_neighbor, tzinfo=timezone.utc
+            ).to(source.tzinfo)
+
+        # Segments are ordered, disjoint and fully inside the bounds.
+        assert all(
+            start <= seg_start <= seg_end <= end for seg_start, seg_end in segments
+        )
+        assert [seg_start for seg_start, _ in segments] == sorted(
+            seg_start for seg_start, _ in segments
+        )
+
+        # Exact, microsecond-accurate, closed boundaries with no false neighbour.
+        for seg_start, seg_end in segments:
+            assert matches(seg_start) and matches(seg_end)
+            if seg_start > start:
+                assert not matches(instant_neighbor(seg_start, -1))
+            if seg_end < end:
+                assert not matches(instant_neighbor(seg_end, 1))
+
+        # Equivalence with an exhaustive replay across the source interval.
+        brute = _brute_force_reverse(
+            target, start, end, shifts, fold=fold, step_seconds=brute_step_seconds
+        )
+        for point in brute:
+            assert any(seg_start <= point <= seg_end for seg_start, seg_end in segments)
+        for seg_start, seg_end in segments:
+            probe = seg_start
+            while probe <= seg_end:
+                assert matches(probe)
+                probe = probe.shift(seconds=brute_step_seconds)
+
+        return segments
+
+    def test_month_end_clamping_collapses_days(self):
+        # Jan 29, 30 and 31 all clamp to the leap day; a naive "-1 month" from
+        # Feb 29 only returns Jan 29 and misses the other two billing dates.
+        target = arrow.Arrow(2020, 2, 29)
+        start = arrow.Arrow(2020, 1, 1)
+        end = arrow.Arrow(2020, 2, 15)
+
+        segments = arrow.Arrow.reverse_shift(target, start, end, [{"months": 1}])
+
+        assert segments == [
+            (
+                arrow.Arrow(2020, 1, 29, 0, 0, 0),
+                arrow.Arrow(2020, 1, 31, 23, 59, 59, 999999),
+            )
+        ]
+        for day in (29, 30, 31):
+            assert arrow.Arrow(2020, 1, day).shift(months=1).date() == target.date()
+        assert arrow.Arrow(2020, 1, 28).shift(months=1).date() != target.date()
+
+    def test_month_end_clamping_brute_force(self):
+        self._assert_equivalent(
+            arrow.Arrow(2020, 2, 29),
+            arrow.Arrow(2020, 1, 25),
+            arrow.Arrow(2020, 2, 5),
+            [{"months": 1}],
+            brute_step_seconds=60,
+        )
+
+    def test_negative_month_shift_clamping(self):
+        self._assert_equivalent(
+            arrow.Arrow(2020, 2, 29),
+            arrow.Arrow(2020, 3, 28),
+            arrow.Arrow(2020, 4, 2),
+            [{"months": -1}],
+            brute_step_seconds=60,
+        )
+
+    def test_interleaved_day_and_month_rules_keep_order(self):
+        # {"days": 1} then {"months": 1} is not the same as the combined rule:
+        # Jan 30 -> Jan 31 -> Feb 29, whereas months-then-days lands on Mar 1.
+        shifts = [{"days": 1}, {"months": 1}]
+        assert arrow.Arrow(2020, 1, 30).shift(days=1).shift(months=1).date() == date(
+            2020, 2, 29
+        )
+        self._assert_equivalent(
+            arrow.Arrow(2020, 2, 29),
+            arrow.Arrow(2020, 1, 27),
+            arrow.Arrow(2020, 2, 3),
+            shifts,
+            brute_step_seconds=60,
+        )
+
+    def test_sequential_month_shifts_differ_from_combined(self):
+        # Two ordered +1 month shifts clamp at each step (Jan 31 -> Feb 29 -> Mar 29).
+        sequential = [{"months": 1}, {"months": 1}]
+        assert arrow.Arrow(2020, 1, 31).shift(months=1).shift(months=1) == arrow.Arrow(
+            2020, 3, 29
+        )
+        assert arrow.Arrow(2020, 1, 31).shift(months=2) == arrow.Arrow(2020, 3, 31)
+        self._assert_equivalent(
+            arrow.Arrow(2020, 3, 29),
+            arrow.Arrow(2020, 1, 28),
+            arrow.Arrow(2020, 2, 2),
+            sequential,
+            brute_step_seconds=60,
+        )
+
+    def test_sub_day_boundary_is_microsecond_exact(self):
+        self._assert_equivalent(
+            arrow.Arrow(2024, 1, 2),
+            arrow.Arrow(2024, 1, 1, 0, 0, 0),
+            arrow.Arrow(2024, 1, 2, 23, 0, 0),
+            [{"hours": 6}],
+        )
+
+    def test_segments_are_clipped_to_bounds(self):
+        target = arrow.Arrow(2020, 2, 29)
+        # Start and end cut through the otherwise full Jan 29 - Jan 31 region.
+        start = arrow.Arrow(2020, 1, 30, 12, 0, 0)
+        end = arrow.Arrow(2020, 1, 31, 12, 0, 0)
+        segments = arrow.Arrow.reverse_shift(target, start, end, [{"months": 1}])
+
+        assert segments == [(start, end)]
+
+    def test_no_solution_returns_empty(self):
+        assert (
+            arrow.Arrow.reverse_shift(
+                arrow.Arrow(2020, 6, 1),
+                arrow.Arrow(2020, 1, 1),
+                arrow.Arrow(2020, 1, 5),
+                [{"months": 1}],
+            )
+            == []
+        )
+
+    def test_target_timezone_determines_calendar_day(self):
+        new_york = tz.gettz("America/New_York")
+        target = arrow.Arrow(2024, 3, 10, tzinfo=new_york)
+        segments = arrow.Arrow.reverse_shift(
+            target,
+            arrow.Arrow(2024, 2, 9, 0, tzinfo=new_york),
+            arrow.Arrow(2024, 2, 11, 23, 59, tzinfo=new_york),
+            [{"months": 1}],
+        )
+        # Only Feb 10 sources shift to Mar 10 in the target's local calendar.
+        assert segments == [
+            (
+                arrow.Arrow(2024, 2, 10, 0, 0, tzinfo=new_york),
+                arrow.Arrow(2024, 2, 10, 23, 59, 59, 999999, tzinfo=new_york),
+            )
+        ]
+
+    def test_imaginary_dst_time_is_resolved(self):
+        new_york = tz.gettz("America/New_York")
+        # 02:30 on the spring-forward day does not exist; shift() resolves it.
+        landed = arrow.Arrow(2024, 2, 10, 2, 30, tzinfo=new_york).shift(months=1)
+        assert landed.datetime.hour == 3
+        self._assert_equivalent(
+            landed,
+            arrow.Arrow(2024, 2, 9, 0, tzinfo=new_york),
+            arrow.Arrow(2024, 2, 11, 23, 59, tzinfo=new_york),
+            [{"months": 1}],
+            brute_step_seconds=60,
+        )
+
+    def test_check_imaginary_false_is_forwarded(self):
+        new_york = tz.gettz("America/New_York")
+        landed = arrow.Arrow(2024, 2, 10, 2, 30, tzinfo=new_york).shift(
+            months=1, check_imaginary=False
+        )
+        segments = arrow.Arrow.reverse_shift(
+            landed,
+            arrow.Arrow(2024, 2, 9, 0, tzinfo=new_york),
+            arrow.Arrow(2024, 2, 11, 23, 59, tzinfo=new_york),
+            [{"months": 1}],
+            check_imaginary=False,
+        )
+        # The replay must use the same policy, so the source day still matches.
+        assert any(
+            arrow.Arrow(2024, 2, 10, 0, tzinfo=new_york) <= seg_start
+            and seg_end <= arrow.Arrow(2024, 2, 10, 23, 59, 59, 999999, tzinfo=new_york)
+            for seg_start, seg_end in segments
+        )
+
+    def test_fold_policy_on_ambiguous_result(self):
+        new_york = tz.gettz("America/New_York")
+        # A +1 hour shift that lands in the fall-back ambiguous window always
+        # produces fold == 0, so requiring fold == 0 succeeds and fold == 1 fails.
+        target = arrow.Arrow(2024, 11, 3, 1, 30, tzinfo=new_york)
+        start = arrow.Arrow(2024, 11, 3, 0, 0, tzinfo=new_york)
+        end = arrow.Arrow(2024, 11, 3, 3, 0, tzinfo=new_york)
+
+        fold_zero = arrow.Arrow.reverse_shift(
+            target, start, end, [{"hours": 1}], fold=0
+        )
+        fold_one = arrow.Arrow.reverse_shift(
+            target, start, end, [{"hours": 1}], fold=1
+        )
+
+        assert fold_zero and not fold_one
+        self._assert_equivalent(target, start, end, [{"hours": 1}], fold=0)
+
+    def test_cross_zone_fold_one_is_an_interior_band(self):
+        # Sources in UTC mapped into a fall-back zone: the fold == 1 occurrence of
+        # 01:30 (New York) corresponds to 06:00-06:59 UTC and sits *inside* a day
+        # whose edges both match the date, so it cannot be found by edge probing.
+        new_york = tz.gettz("America/New_York")
+        target = arrow.Arrow(2024, 11, 3, 1, 30, tzinfo=new_york)
+        start = arrow.Arrow(2024, 11, 3, 4, 0, tzinfo=timezone.utc)
+        end = arrow.Arrow(2024, 11, 3, 8, 0, tzinfo=timezone.utc)
+
+        fold_one = arrow.Arrow.reverse_shift(target, start, end, [], fold=1)
+        fold_zero = arrow.Arrow.reverse_shift(target, start, end, [], fold=0)
+
+        assert fold_one == [
+            (
+                arrow.Arrow(2024, 11, 3, 6, 0, tzinfo=timezone.utc),
+                arrow.Arrow(2024, 11, 3, 6, 59, 59, 999999, tzinfo=timezone.utc),
+            )
+        ]
+        # fold == 0 is the rest of the matching band, split into two segments.
+        assert fold_zero == [
+            (
+                arrow.Arrow(2024, 11, 3, 4, 0, tzinfo=timezone.utc),
+                arrow.Arrow(2024, 11, 3, 5, 59, 59, 999999, tzinfo=timezone.utc),
+            ),
+            (
+                arrow.Arrow(2024, 11, 3, 7, 0, tzinfo=timezone.utc),
+                arrow.Arrow(2024, 11, 3, 8, 0, tzinfo=timezone.utc),
+            ),
+        ]
+        self._assert_equivalent(
+            target, start, end, [], fold=1, brute_step_seconds=30
+        )
+        self._assert_equivalent(
+            target, start, end, [], fold=0, brute_step_seconds=30
+        )
+
+    def test_day_has_ambiguity_helper(self):
+        new_york = tz.gettz("America/New_York")
+        # A fall-back day contains a repeated (ambiguous) wall time.
+        assert arrow.Arrow._day_has_ambiguity(new_york, date(2024, 11, 3)) is True
+        # A normal day and a spring-forward (imaginary-only) day do not.
+        assert arrow.Arrow._day_has_ambiguity(new_york, date(2024, 6, 15)) is False
+        assert arrow.Arrow._day_has_ambiguity(new_york, date(2024, 3, 10)) is False
+
+    def test_deleted_calendar_day_zone(self):
+        # Pacific/Apia skipped 2011-12-30 entirely. The reverse search must treat
+        # the surrounding labels as one continuous absolute interval without
+        # revisiting or overlapping the non-existent day.
+        apia = tz.gettz("Pacific/Apia")
+        start = arrow.Arrow(2011, 12, 29, 21, 59, tzinfo=apia)
+        end = arrow.Arrow(2012, 1, 1, 1, 59, tzinfo=apia)
+        target = start.shift(weeks=-1).to(apia)
+
+        segments = arrow.Arrow.reverse_shift(target, start, end, [{"weeks": -1}])
+
+        assert segments
+        for seg_start, seg_end in segments:
+            assert start <= seg_start <= seg_end <= end
+        # No segment crosses itself out of order, and a forward replay of each
+        # reported boundary lands exactly on the target calendar day.
+        for seg_start, seg_end in segments:
+            assert seg_start.shift(weeks=-1).date() == target.date()
+            assert seg_end.shift(weeks=-1).date() == target.date()
+
+    def test_non_monotone_dst_predicate_uses_robust_scan(self):
+        # Negative sub-day shifts hitting an imaginary (spring-forward) instant can
+        # make the date predicate dip and recover inside one source day. The robust
+        # per-day scan still returns exact, contiguous matching intervals.
+        chatham = tz.gettz("Pacific/Chatham")
+        apia = tz.gettz("Pacific/Apia")
+        shifts = [{"hours": -1}, {"hours": -3}, {"months": -1}]
+        start = arrow.Arrow(2024, 3, 31, 0, 0, tzinfo=chatham)
+        end = arrow.Arrow(2024, 3, 31, 23, 59, 59, tzinfo=chatham)
+        target = start.shift(**shifts[0]).shift(**shifts[1]).shift(
+            **shifts[2]
+        ).to(apia)
+
+        self._assert_equivalent(
+            target, start, end, shifts, brute_step_seconds=60
+        )
+
+    def test_invalid_arguments_raise(self):
+        target = arrow.Arrow(2020, 2, 29)
+        with pytest.raises(ValueError):
+            arrow.Arrow.reverse_shift(
+                target,
+                arrow.Arrow(2020, 2, 1),
+                arrow.Arrow(2020, 1, 1),
+                [{"months": 1}],
+            )
+        with pytest.raises(ValueError):
+            arrow.Arrow.reverse_shift(
+                target,
+                arrow.Arrow(2020, 1, 1),
+                arrow.Arrow(2020, 2, 1),
+                [{"months": 1}],
+                fold=2,
+            )
+
+    def test_long_interval_does_not_enumerate_microseconds(self):
+        # A multi-year window must stay cheap: it walks days, not microseconds.
+        start = arrow.Arrow(2000, 1, 1)
+        end = arrow.Arrow(2025, 12, 31)
+        target = arrow.Arrow(2025, 2, 28)
+
+        begin = time.monotonic()
+        segments = arrow.Arrow.reverse_shift(target, start, end, [{"months": 1}])
+        elapsed = time.monotonic() - begin
+
+        assert elapsed < 5
+        # Feb 2025 has 28 days, so Jan 28-31 all clamp onto the 28th and merge.
+        assert segments == [
+            (
+                arrow.Arrow(2025, 1, 28, 0, 0, 0),
+                arrow.Arrow(2025, 1, 31, 23, 59, 59, 999999),
+            )
+        ]
+
+
 class TestArrowRange:
     def test_year(self):
         result = list(
