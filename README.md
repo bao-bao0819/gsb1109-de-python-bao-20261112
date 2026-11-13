@@ -42,6 +42,7 @@ In particular, it provides the following features:
       * [Import & export intervals to strings](#import--export-intervals-to-strings)
       * [Import & export intervals to Python built-in data types](#import--export-intervals-to-python-built-in-data-types)
       * [Specialize & customize intervals](#specialize--customize-intervals)
+      * [Migrate histograms between bucket layouts](#migrate-histograms-between-bucket-layouts)
   * [Changelog](#changelog)
   * [Contributions](#contributions)
   * [License](#license)
@@ -948,6 +949,57 @@ The following examples illustrate some of the cases where additional checks shou
 True
 >>> ~N.singleton(0.5)
 [1.5,+inf)
+
+```
+
+
+
+### Migrate histograms between bucket layouts
+
+When a histogram changes its bucket boundaries, the counts of the old layout cannot always be translated into exact counts for the new one: a new bucket that straddles an old boundary only admits bounds. `HistogramMigrator` keeps track of which new buckets are exact, which are only bounded, and which requested combinations of counts cannot come from the same batch of samples.
+
+An old histogram provides one count per old bucket, and optionally the number of samples *exactly equal* to a threshold (those samples are peeled off as their own singleton cell).
+
+```python
+>>> old = [P.closedopen(0, 10), P.closedopen(10, 20)]
+>>> new = [P.closedopen(0, 5), P.closedopen(5, 15), P.closedopen(15, 20)]
+>>> migrator = P.HistogramMigrator(old, new, {old[0]: 10, old[1]: 10})
+>>> migrator.migrate(new[0]).status
+<MigrationStatus.BOUNDED: 'bounded'>
+>>> migrator.migrate(new[0]).as_range()
+(0, 10)
+
+```
+
+A threshold count is migrated exactly and removed from the surrounding bucket's free samples.
+
+```python
+>>> migrator = P.HistogramMigrator(
+...     old, new, {old[0]: 10, old[1]: 10}, exact_counts={10: 3}
+... )
+>>> migrator.migrate(new[1]).as_range()  # always holds the 3 samples equal to 10
+(3, 20)
+
+```
+
+Several buckets can be queried together. The group range is computed from an allocation that is jointly feasible for *all* of them, so a shared old bucket is counted once instead of being added per bucket.
+
+```python
+>>> migrator.group_range([new[0], new[1]]).as_range()
+(13, 20)
+
+```
+
+Finally, an explicit vector of per-bucket counts can be checked for feasibility. Two buckets may each reach a high maximum on their own while being unable to reach the sum of those maxima together, because they compete for the same old samples.
+
+```python
+>>> migrator = P.HistogramMigrator(old, new, {old[0]: 10, old[1]: 10})
+>>> migrator.migrate(new[0]).upper + migrator.migrate(new[1]).upper
+30
+>>> migrator.group_range([new[0], new[1]]).upper  # tight joint maximum
+20
+>>> migrator.is_feasible({new[0]: 10, new[1]: 20, new[2]: 0})
+False
 
 ```
 
