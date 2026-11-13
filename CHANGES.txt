@@ -1,6 +1,15 @@
 CHANGES
 =======
 
+Unreleased
+----------
+
+New features:
+
+- `affine.regrid.regrid_window()` redistributes an input window of pixel
+  totals onto another grid in proportion to the true polygon intersection
+  area, separately accounting for masked pixels and out-of-window shares.
+
 3.0.1 (2026-08-28)
 ------------------
 
