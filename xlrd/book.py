@@ -5,10 +5,12 @@
 from __future__ import print_function
 
 import struct
+from contextlib import contextmanager
 
 from . import compdoc, formatting, sheet
 from .biffh import *
 from .formula import *
+from .sheet_cache import BoundedSheetCache
 from .timemachine import *
 
 try:
@@ -61,7 +63,16 @@ def open_workbook_xls(filename=None,
                       file_contents=None,
                       encoding_override=None,
                       formatting_info=False, on_demand=False, ragged_rows=False,
-                      ignore_workbook_corruption=False):
+                      ignore_workbook_corruption=False,
+                      sheet_cache_size=None):
+    if sheet_cache_size is not None:
+        if not isinstance(sheet_cache_size, int) \
+                or isinstance(sheet_cache_size, bool):
+            raise TypeError("sheet_cache_size must be an int, got %r"
+                            % type(sheet_cache_size).__name__)
+        if sheet_cache_size < 1:
+            raise ValueError("sheet_cache_size must be >= 1, got %d"
+                             % sheet_cache_size)
     t0 = perf_counter()
     bk = Book()
     try:
@@ -103,6 +114,7 @@ def open_workbook_xls(filename=None,
         else:
             bk.parse_globals()
             bk._sheet_list = [None for sh in bk._sheet_names]
+            bk._init_sheet_cache(sheet_cache_size, on_demand)
             if not on_demand:
                 bk.get_sheets()
         bk.nsheets = len(bk._sheet_list)
@@ -435,18 +447,21 @@ class Book(BaseObject):
         """
         :returns: A list of all sheets in the book.
 
-        All sheets not already loaded will be loaded.
+        All sheets not already loaded will be loaded. With a bounded
+        ``on_demand`` cache the returned :class:`~xlrd.sheet.Sheet` objects
+        stay usable even when their cache slot is later retired to honour
+        the budget.
         """
-        for sheetx in xrange(self.nsheets):
-            if not self._sheet_list[sheetx]:
-                self.get_sheet(sheetx)
-        return self._sheet_list[:]
+        return [self.sheet_by_index(sheetx)
+                for sheetx in xrange(self.nsheets)]
 
     def sheet_by_index(self, sheetx):
         """
         :param sheetx: Sheet index in ``range(nsheets)``
         :returns: A :class:`~xlrd.sheet.Sheet`.
         """
+        if self._sheet_cache is not None and not self._resources_released:
+            return self._sheet_cache.acquire(sheetx)
         return self._sheet_list[sheetx] or self.get_sheet(sheetx)
 
     def __iter__(self):
@@ -508,6 +523,10 @@ class Book(BaseObject):
         """
         :param sheet_name_or_index: Name or index of sheet to be unloaded.
 
+        When a budgeted sheet cache is active, the sheet is refused for
+        unload while it has an active borrower; otherwise it is evicted
+        immediately and counted in the cache's unload tally.
+
         .. versionadded:: 0.7.1
         """
         if isinstance(sheet_name_or_index, int):
@@ -517,7 +536,10 @@ class Book(BaseObject):
                 sheetx = self._sheet_names.index(sheet_name_or_index)
             except ValueError:
                 raise XLRDError('No sheet named <%r>' % sheet_name_or_index)
-        self._sheet_list[sheetx] = None
+        if self._sheet_cache is not None:
+            self._sheet_cache.evict(sheetx)
+        else:
+            self._sheet_list[sheetx] = None
 
     def release_resources(self):
         """
@@ -532,6 +554,10 @@ class Book(BaseObject):
         same object has no ill effect.
         """
         self._resources_released = 1
+        if self._sheet_cache is not None:
+            # Resident sheets stay available for examination; no further
+            # on-demand loads are accepted once resources are gone.
+            self._sheet_cache.close()
         if hasattr(self.mem, "close"):
             # must be a mmap.mmap object
             self.mem.close()
@@ -548,6 +574,73 @@ class Book(BaseObject):
     def __exit__(self, exc_type, exc_value, exc_tb):
         self.release_resources()
         # return false
+
+    def _resolve_sheetx(self, sheet_name_or_index):
+        if isinstance(sheet_name_or_index, int):
+            return sheet_name_or_index
+        try:
+            return self._sheet_names.index(sheet_name_or_index)
+        except ValueError:
+            raise XLRDError('No sheet named <%r>' % sheet_name_or_index)
+
+    def _init_sheet_cache(self, sheet_cache_size, on_demand):
+        """Attach the bounded cache once the workbook globals are known."""
+        if not on_demand:
+            # A fully-loaded book keeps every sheet resident for its whole
+            # life, so eviction budgeting does not apply to it.
+            self._sheet_cache = None
+            return
+        if sheet_cache_size is None:
+            # No explicit budget: keep every sheet, preserving the historical
+            # on-demand behaviour while still tracking borrows and counters.
+            sheet_cache_size = len(self._sheet_list)
+        self._sheet_cache = BoundedSheetCache(self, sheet_cache_size)
+
+    @property
+    def sheet_cache(self):
+        """The :class:`~xlrd.sheet_cache.BoundedSheetCache`, or ``None``."""
+        return self._sheet_cache
+
+    @contextmanager
+    def borrow_sheet(self, sheet_name_or_index):
+        """
+        Lend one sheet to a reader for the duration of a ``with`` block.
+
+        Two readers borrowing the same sheet trigger a single physical load.
+        The sheet is pinned while borrowed: it cannot be evicted by another
+        borrower finishing or by LRU pressure. When the budget is exhausted by
+        pinned sheets, :class:`~xlrd.sheet_cache.SheetBudgetExceeded` names the
+        blocking sheets and leaves all delivered rows intact. If the block
+        raises, the borrow is still released so later sheets keep loading.
+        """
+        if self._sheet_cache is None:
+            # No bounded cache (e.g. fully-loaded book): lend directly.
+            yield self.sheet_by_index(
+                self._resolve_sheetx(sheet_name_or_index))
+            return
+        sheetx = self._resolve_sheetx(sheet_name_or_index)
+        with self._sheet_cache.borrow(sheetx) as sh:
+            yield sh
+
+    def sheet_cache_info(self):
+        """
+        :returns: A snapshot dict of budget, loaded sheets, borrower counts
+                  and load/unload counters; ``None`` when no cache is active.
+        """
+        if self._sheet_cache is None:
+            return None
+        return self._sheet_cache.info()
+
+    def reconcile_sheet_cache(self):
+        """
+        Reconcile physical load/unload counts against resident sheets.
+
+        :returns: A dict including ``balanced`` (``loads - unloads`` equals
+                  the number of loaded sheets); ``None`` without a cache.
+        """
+        if self._sheet_cache is None:
+            return None
+        return self._sheet_cache.reconcile()
 
     #: A mapping from ``(lower_case_name, scope)`` to a single :class:`Name`
     #:  object.
@@ -568,6 +661,8 @@ class Book(BaseObject):
         self._sheet_visibility = [] # from BOUNDSHEET record
         self.nsheets = 0
         self._sh_abs_posn = [] # sheet's absolute position in the stream
+        # Bounded borrow-aware cache; None until the globals are parsed.
+        self._sheet_cache = None
         self._sharedstrings = []
         self._rich_text_runlist_map = {}
         self.raw_user_name = False
@@ -694,6 +789,13 @@ class Book(BaseObject):
         return (code, length, data)
 
     def get_sheet(self, sh_number, update_pos=True):
+        if update_pos and self._sheet_cache is not None:
+            return self._sheet_cache.acquire(sh_number)
+        return self._load_sheet(sh_number, update_pos=update_pos)
+
+    def _load_sheet(self, sh_number, update_pos=True):
+        # Physical sheet parse. The bounded cache (when present) decides
+        # whether a slot must first be freed; this only does the reading.
         if self._resources_released:
             raise XLRDError("Can't load sheets after releasing resources.")
         if update_pos:

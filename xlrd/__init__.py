@@ -17,6 +17,7 @@ from .compdoc import SIGNATURE as XLS_SIGNATURE
 from .formula import *  # is constrained by __all__
 from .info import __VERSION__, __version__
 from .sheet import empty_cell
+from .sheet_cache import BoundedSheetCache, SheetBudgetExceeded
 from .xldate import XLDateError, xldate_as_datetime, xldate_as_tuple
 
 
@@ -90,7 +91,8 @@ def open_workbook(filename=None,
                   formatting_info=False,
                   on_demand=False,
                   ragged_rows=False,
-                  ignore_workbook_corruption=False
+                  ignore_workbook_corruption=False,
+                  sheet_cache_size=None
                   ):
     """
     Open a spreadsheet file for data extraction.
@@ -160,6 +162,18 @@ def open_workbook(filename=None,
       When ``False`` you may face CompDocError: Workbook corruption.
       When ``True`` that exception will be ignored.
 
+    :param sheet_cache_size:
+
+      Maximum number of worksheets kept loaded at once when reading an
+      ``on_demand`` workbook (a positive int; ignored unless ``on_demand`` is
+      true). Sheets are borrowed through
+      :meth:`~xlrd.book.Book.borrow_sheet`; a borrowed sheet is pinned until
+      released and shared between readers, loading only once. When the budget
+      is full, unborrowed sheets are retired LRU; if every resident sheet is
+      still borrowed, :class:`~xlrd.sheet_cache.SheetBudgetExceeded` is raised
+      naming the blocking sheets without unloading anything. ``None`` means no
+      eviction (the historical on-demand behaviour).
+
     :returns: An instance of the :class:`~xlrd.book.Book` class.
     """
 
@@ -180,6 +194,7 @@ def open_workbook(filename=None,
         on_demand=on_demand,
         ragged_rows=ragged_rows,
         ignore_workbook_corruption=ignore_workbook_corruption,
+        sheet_cache_size=sheet_cache_size,
     )
 
     return bk

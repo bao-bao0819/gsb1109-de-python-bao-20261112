@@ -55,3 +55,47 @@ explicitly in the finally part of a try/finally block.
 
 The Book object is also a context manager, so  you can wrap your code in a
 ``with`` statement that will make sure underlying resources are closed.
+
+Budgeted, borrow-aware sheet cache
+----------------------------------
+
+An import job that works through many worksheets in turn can cap how many
+sheets are resident at once by passing the ``sheet_cache_size`` argument to
+:func:`~xlrd.open_workbook` (it only takes effect when ``on_demand=True``)::
+
+    book = open_workbook(path, on_demand=True, sheet_cache_size=2)
+
+Rather than loading a sheet and remembering to unload it, a reader *borrows*
+a sheet through the :meth:`Book.borrow_sheet` context manager::
+
+    with book.borrow_sheet(sheetx) as sheet:
+        rows = [sheet.row_values(r) for r in range(sheet.nrows)]
+
+The cache gives the following guarantees:
+
+* Two readers borrowing the same sheet share one physical load; the sheet is
+  only parsed once.
+* A borrowed sheet is *pinned*. It is not evicted when another borrower
+  finishes or under least-recently-used (LRU) pressure, so rows already handed
+  to a reader stay valid for the whole ``with`` block.
+* When the budget is full, sheets whose borrowers have all released them are
+  retired LRU to make room.
+* If every resident sheet is still borrowed, loading another sheet raises
+  :class:`xlrd.sheet_cache.SheetBudgetExceeded`. The exception exposes
+  ``sheetx``, ``blocking_sheets`` and ``blocking_sheet_names`` so the caller
+  can see which in-use pages prevent the load. Nothing is unloaded and no row
+  already delivered is affected; releasing a borrower and retrying succeeds.
+* If the ``with`` body raises, the borrow is released automatically in the
+  ``finally`` phase, so a reader that crashes does not pin the sheet and the
+  next worksheet can still be brought into the cache.
+
+Physical loads and evictions are counted. :meth:`Book.sheet_cache_info`
+returns a snapshot of the budget, resident sheets, per-sheet borrower counts
+and the ``loads``/``unloads``/``evictions``/``failed_loads`` counters;
+:meth:`Book.reconcile_sheet_cache` checks that ``loads - unloads`` equals the
+number of resident sheets (``balanced``). The cache itself is available as
+:attr:`Book.sheet_cache` (``None`` for a fully-loaded, non-on-demand book).
+
+When ``sheet_cache_size`` is omitted, every on-demand sheet stays loaded,
+which preserves the pre-existing on-demand behaviour.
+

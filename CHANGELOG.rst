@@ -1,6 +1,19 @@
 Changes
 =======
 
+Unreleased
+----------
+
+- Add a budgeted, borrow-aware cache for ``on_demand`` workbooks via the
+  ``sheet_cache_size`` argument to :func:`xlrd.open_workbook` and the
+  :meth:`xlrd.book.Book.borrow_sheet` context manager. Borrowed sheets are
+  pinned until released and shared between readers (one physical load),
+  unborrowed sheets are retired LRU under the budget, and an exhausted budget
+  raises :class:`xlrd.sheet_cache.SheetBudgetExceeded` naming the blocking
+  sheets without dropping delivered rows. Load/unload counters are exposed
+  through :meth:`xlrd.book.Book.sheet_cache_info` and
+  :meth:`xlrd.book.Book.reconcile_sheet_cache`.
+
 2.0.2 (14 June 2025)
 --------------------
 
