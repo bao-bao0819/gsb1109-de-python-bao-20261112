@@ -1,6 +1,20 @@
 CHANGES
 =======
 
+3.1.0 (unreleased)
+------------------
+
+New features:
+
+- New module `affine.sheets` with `MapSheet` and `locate_point()` for
+  exact map-sheet coverage queries during batch imports. Transform
+  coefficients and world coordinates are parsed from integer strings or
+  finite decimals and inverted with rational arithmetic, so exact
+  business boundaries never shift a column or row through float
+  conversion. Pixel coordinates follow the half-open convention (left
+  and top edges inclusive, right and bottom exclusive), and results
+  distinguish legitimate overlap, shared edges, and no coverage.
+
 3.0.1 (2026-08-28)
 ------------------
 

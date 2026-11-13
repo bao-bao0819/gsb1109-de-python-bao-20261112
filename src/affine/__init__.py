@@ -42,7 +42,14 @@ import warnings
 
 from attrs import astuple, define, field
 
-__all__ = ["Affine"]
+__all__ = [
+    "Affine",
+    "Coverage",
+    "CoverageResult",
+    "MapSheet",
+    "SheetHit",
+    "locate_point",
+]
 __author__ = "Sean Gillies"
 __version__ = "3.0.1"
 
@@ -771,3 +778,11 @@ def set_epsilon(epsilon: float) -> None:
 
 
 set_epsilon(1e-5)
+
+from affine.sheets import (  # noqa: E402
+    Coverage,
+    CoverageResult,
+    MapSheet,
+    SheetHit,
+    locate_point,
+)
