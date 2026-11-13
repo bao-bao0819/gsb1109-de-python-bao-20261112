@@ -6,12 +6,22 @@ __author_email__ = "c0fec0de@gmail.com"
 __description__ = """Powerful and Lightweight Python Tree Data Structure."""
 __url__ = "https://github.com/c0fec0de/anytree"
 
-from . import cachedsearch, util
+from . import cachedsearch, temporal, util
 from .iterators import LevelOrderGroupIter, LevelOrderIter, PostOrderIter, PreOrderIter, ZigZagGroupIter
 from .node import AnyNode, LightNodeMixin, LoopError, Node, NodeMixin, SymlinkNode, SymlinkNodeMixin, TreeError
 from .render import AbstractStyle, AsciiStyle, ContRoundStyle, ContStyle, DoubleStyle, RenderTree
 from .resolver import ChildResolverError, Resolver, ResolverError, RootResolverError
 from .search import CountError, find, find_by_attr, findall, findall_by_attr
+from .temporal import (
+    TemporalAmbiguityError,
+    TemporalDimension,
+    TemporalEdge,
+    TemporalFailure,
+    TemporalLoopError,
+    TemporalPublishError,
+    TemporalTreeError,
+    TemporalValidationResult,
+)
 from .walker import Walker, WalkError
 
 # legacy
@@ -42,6 +52,14 @@ __all__ = [
     "RootResolverError",
     "SymlinkNode",
     "SymlinkNodeMixin",
+    "TemporalAmbiguityError",
+    "TemporalDimension",
+    "TemporalEdge",
+    "TemporalFailure",
+    "TemporalLoopError",
+    "TemporalPublishError",
+    "TemporalTreeError",
+    "TemporalValidationResult",
     "TreeError",
     "WalkError",
     "Walker",
@@ -51,5 +69,6 @@ __all__ = [
     "find_by_attr",
     "findall",
     "findall_by_attr",
+    "temporal",
     "util",
 ]
