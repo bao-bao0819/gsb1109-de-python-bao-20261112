@@ -1,6 +1,16 @@
 CHANGES
 =======
 
+3.1.0 (TBD)
+-----------
+
+New features:
+
+- Added the affine.overview module with OverviewLevel, OverviewSelection, and
+  select_overview. Given a target window in world coordinates and a maximum
+  acceptable pixel size, select_overview chooses the qualifying overview level
+  and tile set with the fewest compressed bytes to read.
+
 3.0.1 (2026-08-28)
 ------------------
 

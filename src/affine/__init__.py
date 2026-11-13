@@ -42,7 +42,9 @@ import warnings
 
 from attrs import astuple, define, field
 
-__all__ = ["Affine"]
+from affine.overview import OverviewLevel, OverviewSelection, select_overview
+
+__all__ = ["Affine", "OverviewLevel", "OverviewSelection", "select_overview"]
 __author__ = "Sean Gillies"
 __version__ = "3.0.1"
 
