@@ -14,6 +14,7 @@ Details:
    references.rst
    formatting.rst
    on_demand.rst
+   summarising.rst
    api.rst
 
 For details of how to get involved in development of this package,

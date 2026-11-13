@@ -1,6 +1,15 @@
 Changes
 =======
 
+Unreleased
+----------
+
+- Add :mod:`xlrd.summary`: partition-wise financial summaries of an amount
+  column with configurable inclusive lower/upper bounds, separate booking of
+  error, blank, empty and valid-zero cells, key-based duplicate handling with
+  contradiction ranges and source witnesses, and cross-partition merging that
+  recognises shared transactions instead of adding ranges.
+
 2.0.2 (14 June 2025)
 --------------------
 

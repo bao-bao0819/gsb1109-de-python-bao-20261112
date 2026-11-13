@@ -58,6 +58,22 @@ xlrd.sheet
    :members:
    :exclude-members: Sheet
 
+xlrd.summary
+------------
+
+.. automodule:: xlrd.summary
+   :members:
+   :exclude-members: CellRef, TransactionGroup, UnresolvedEntry
+
+.. autoclass:: xlrd.summary.CellRef
+   :members:
+
+.. autoclass:: xlrd.summary.TransactionGroup
+   :members:
+
+.. autoclass:: xlrd.summary.UnresolvedEntry
+   :members:
+
 xlrd.xldate
 -----------
 
