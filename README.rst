@@ -104,3 +104,44 @@ The reverse transformation is obtained using the ``~`` inverse operator.
   >>> rev = ~fwd
   >>> rev @ fwd @ (col, row)
   (0.0, 99.99999999999999)
+
+Calibration from control points
+-------------------------------
+
+When importing an old map, a set of control points pairs pixel
+``(col, row)`` coordinates with field ``(east, north)`` coordinates. At
+most one record may be wrong, and either world component may be missing
+(use ``None``); a record missing its east coordinate still constrains the
+north subsystem. ``find_calibrations()`` enumerates every distinct affine
+calibration whose component-wise residuals stay within the given bounds.
+
+.. code-block:: pycon
+
+  >>> from affine import ControlPoint, Bounds, find_calibrations, admit_pixel
+  >>> points = [
+  ...     ControlPoint("g1", 0, 0, 100.0, 500.0),
+  ...     ControlPoint("g2", 10, 4, 121.2, 492.0),
+  ...     ControlPoint("g3", 25, 13, 153.9, 475.5),
+  ...     ControlPoint("g4", 7, 31, 123.3, 452.1),
+  ...     ControlPoint("g5", 40, 20, 186.0, 462.0),
+  ...     ControlPoint("g6", 18, 9, 999.0, 482.9),  # wrong east value
+  ... ]
+  >>> calibrations = find_calibrations(points, east_tolerance=0.5, north_tolerance=0.5)
+  >>> calibrations[0].discarded
+  ('g6',)
+
+A pixel is admitted into the database only when every feasible
+calibration maps it inside the acceptance box. Otherwise the violating
+calibrations and pixel positions are reported.
+
+.. code-block:: pycon
+
+  >>> result = admit_pixel(
+  ...     calibrations, 2.0, 2.0,
+  ...     Bounds(103.0, 494.0, 106.0, 497.0))
+  >>> result.admitted
+  True
+
+If no interpretation is possible, ``find_calibrations()`` raises
+``CalibrationConflictError``; its ``conflicting_records`` attribute names
+the records incompatible with the strongest component-wise consensus.

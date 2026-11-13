@@ -11,6 +11,9 @@ Module documentation
 .. automodule:: affine
    :members:
 
+.. automodule:: affine.calibration
+   :members:
+
 .. include:: ../../CHANGES.txt
 .. include:: ../../AUTHORS.txt
 

@@ -42,7 +42,21 @@ import warnings
 
 from attrs import astuple, define, field
 
-__all__ = ["Affine"]
+__all__ = [
+    "AdmissionResult",
+    "AdmissionViolation",
+    "Affine",
+    "Bounds",
+    "Calibration",
+    "CalibrationConflictError",
+    "CandidateFailure",
+    "ControlPoint",
+    "PointResidual",
+    "ResidualFailure",
+    "admit_pixel",
+    "evaluate_pixel",
+    "find_calibrations",
+]
 __author__ = "Sean Gillies"
 __version__ = "3.0.1"
 
@@ -771,3 +785,18 @@ def set_epsilon(epsilon: float) -> None:
 
 
 set_epsilon(1e-5)
+
+from .calibration import (  # noqa: E402
+    AdmissionResult,
+    AdmissionViolation,
+    Bounds,
+    Calibration,
+    CalibrationConflictError,
+    CandidateFailure,
+    ControlPoint,
+    PointResidual,
+    ResidualFailure,
+    admit_pixel,
+    evaluate_pixel,
+    find_calibrations,
+)

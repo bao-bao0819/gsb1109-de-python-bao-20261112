@@ -1,6 +1,21 @@
 CHANGES
 =======
 
+Unreleased
+----------
+
+New features:
+
+- The new affine.calibration module performs robust affine calibration
+  from ground control points. find_calibrations() enumerates every
+  calibration that explains the trusted records while allowing at most
+  one wrong record and missing east or north components, which still
+  constrain the other component. admit_pixel() and evaluate_pixel()
+  confirm a pixel for database admission only when every feasible
+  calibration places it inside the acceptance box, otherwise reporting
+  the violating calibrations and pixel positions. When no interpretation
+  holds, CalibrationConflictError identifies the conflicting records.
+
 3.0.1 (2026-08-28)
 ------------------
 
