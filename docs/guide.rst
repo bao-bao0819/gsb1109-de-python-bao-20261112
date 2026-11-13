@@ -247,6 +247,39 @@ Support for a growing number of locales (see ``locales.py`` for supported langua
     >>> future.humanize(a, locale='ru')
     'через 2 час(а,ов)'
 
+Scheduling humanize refreshes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When a UI caches the humanized string for a row, it only needs to re-render at
+the instant the text actually changes. :func:`arrow.humanize_schedule.next_humanize_refresh`
+computes that instant directly from the fixed event, the current reference time
+(board clock), the locale and the granularity. It never scans wall-clock time:
+the timeline is split at the event (a future/past sign flip) and at UTC-offset
+transitions (DST), and each constant segment is binary searched with the real
+renderer, so an event months away still costs only a logarithmic number of
+render calls.
+
+.. code-block:: python
+
+    >>> from arrow import arrow
+    >>> from arrow.humanize_schedule import next_humanize_refresh
+    >>> event = arrow.Arrow(2026, 1, 15, 12, 0, 0, tzinfo="UTC")
+    >>> reference = event.shift(seconds=-5)
+    >>> event.humanize(reference, granularity="second")
+    'in 5 seconds'
+    >>> refresh = next_humanize_refresh(event, reference, granularity="second")
+    >>> event.humanize(refresh, granularity="second")
+    'in 4 seconds'
+
+It covers crossing from the future into the past, calendar month boundaries and
+local offset switches. ``None`` means the text is stable for the whole horizon
+(default two years), and :func:`iter_humanize_refresh` returns every refresh
+instant up to that horizon.
+
+A locale whose humanize logic cannot be guaranteed, or that is missing a
+required timeframe template, is reported with the concrete reason by
+:func:`arrow.humanize_schedule.locale_safety_report`.
+
 Dehumanize
 ~~~~~~~~~~
 

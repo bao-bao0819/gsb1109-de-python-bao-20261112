@@ -1,6 +1,11 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+- [ADDED] Added ``arrow.humanize_schedule`` to compute the next instant a cached ``humanize`` string must be re-rendered, using logarithmic render-driven segment search instead of per-second polling; handles future/past sign flips, calendar month boundaries and DST offset switches, with ``locale_safety_report`` flagging locales that cannot be given a safe term.
+
 1.4.0 (2025-10-18)
 ------------------
 
