@@ -12,3 +12,4 @@ API
     api/anytree.resolver
     api/anytree.walker
     api/anytree.util
+    api/anytree.reconcile
