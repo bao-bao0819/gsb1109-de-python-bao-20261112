@@ -1,6 +1,11 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+- [ADDED] Added ``arrow.device_uptime`` for per-device online and conflict second accounting over ward-local natural days, with resend, revocation and correction handling.
+
 1.4.0 (2025-10-18)
 ------------------
 

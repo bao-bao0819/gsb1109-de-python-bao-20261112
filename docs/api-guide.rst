@@ -26,3 +26,9 @@ API Guide
 .. automodule:: arrow.locales
     :members:
     :undoc-members:
+
+:mod:`arrow.device_uptime`
+==========================
+
+.. automodule:: arrow.device_uptime
+    :members:
