@@ -376,6 +376,23 @@ Calculating Distance
 .. autoclass:: geopy.distance.great_circle
    :show-inheritance:
 
+Trajectory Length Bounds
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: geopy.trajectory
+   :members: __doc__
+
+.. autofunction:: geopy.trajectory.trajectory_length_bounds
+
+.. autoclass:: geopy.trajectory.TrajectorySegment
+   :members:
+
+.. autoclass:: geopy.trajectory.TrajectoryBounds
+   :members:
+
+.. autoclass:: geopy.trajectory.InfeasibleTrajectory
+   :members:
+
 Data
 ~~~~
 
