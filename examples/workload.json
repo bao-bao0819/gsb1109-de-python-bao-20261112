@@ -1,0 +1,13 @@
+{
+  "cache_capacity": 8,
+  "prefetch_budget": 6,
+  "night_discount": 0.4,
+  "pages": [
+    {"name": "A", "size": 2, "cost": 12},
+    {"name": "B", "size": 3, "cost": 9},
+    {"name": "C", "size": 4, "cost": 20},
+    {"name": "D", "size": 2, "cost": 6},
+    {"name": "E", "size": 3, "cost": 15}
+  ],
+  "access_sequence": ["A", "B", "C", "A", "D", "B", "A", "C", "D", "A"]
+}
