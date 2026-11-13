@@ -39,6 +39,7 @@ In particular, it provides the following features:
       * [Interval transformation](#interval-transformation)
       * [Discrete iteration](#discrete-iteration)
       * [Map intervals to data](#map-intervals-to-data)
+      * [Compile grading rules](#compile-grading-rules)
       * [Import & export intervals to strings](#import--export-intervals-to-strings)
       * [Import & export intervals to Python built-in data types](#import--export-intervals-to-python-built-in-data-types)
       * [Specialize & customize intervals](#specialize--customize-intervals)
@@ -711,6 +712,57 @@ While `.combine` accepts a single `IntervalDict`, it can be generalized to suppo
 Finally, similarly to a `dict`, an `IntervalDict` also supports `len`, `in` and `del`, and defines `.clear`, `.copy`, `.update`, `.pop`, `.popitem`, and `.setdefault`.
 For convenience, one can export the content of an `IntervalDict` to a classical Python `dict` using the `as_dict` method. This method accepts an optional `atomic` parameter (whose default is `False`).
 When set to `True`, the keys of the resulting `dict` instance are atomic intervals.
+
+
+[&uparrow; back to top](#table-of-contents)
+### Compile grading rules
+
+When several rules associate intervals with grades, `compile_grading` turns them into an order-independent `GradingMap` that partitions the line into exhaustive segments. Each segment is either uniquely graded, in conflict, or uncovered (a gap).
+
+Rules are provided as `(interval, grade)` or `(interval, grade, source)` tuples, or as `GradeRule` instances. A rule may use any open/closed endpoints and can be reduced to a singleton to override a broader rule on a single value.
+
+```python
+>>> rules = [
+...     (P.closedopen(0, 60), "pass"),
+...     (P.closedopen(60, 80), "warn"),
+...     (P.singleton(60), "review"),
+... ]
+>>> grading = P.compile_grading(rules)
+>>> grading.grade_for(59), grading.grade_for(60), grading.grade_for(61)
+('pass', 'review', 'warn')
+>>> [(repr(segment.interval), segment.status) for segment in grading]
+[('(-inf,0)', 'gap'), ('[0,60)', 'unique'), ('[60]', 'unique'), ('(60,80)', 'unique'), ('[80,+inf)', 'gap')]
+
+```
+
+Specificity comes from strict containment only: a rule is more specific than another when its interval is strictly contained in the other's. Overlapping intervals that neither contains the other have no precedence over each other and produce a conflict.
+
+```python
+>>> crossing = P.compile_grading([
+...     (P.closedopen(0, 5), "a"),
+...     (P.closedopen(3, 8), "b"),
+... ])
+>>> crossing.conflicts()
+[3,5)
+>>> crossing.grade_for(2), crossing.grade_for(6)
+('a', 'b')
+
+```
+
+Querying a conflict raises `GradingConflict`, while querying a gap raises `KeyError`. When same-level sources agree on a grade, the segment stays unique and every agreeing rule is retained in its `basis`.
+
+```python
+>>> shared = P.compile_grading([
+...     (P.closed(0, 10), "A", "lab-1"),
+...     (P.closed(0, 10), "A", "lab-2"),
+... ])
+>>> segment = shared.classify(5)
+>>> segment.grade, sorted(rule.source for rule in segment.basis)
+('A', ['lab-1', 'lab-2'])
+
+```
+
+The result depends only on the set of rules, not on the order they were given: shuffling the rules returns an equal `GradingMap`, so a sample located on a boundary can never switch grade. Pass `domain=` to restrict the reported segments, and use `.gaps()`, `.conflicts()`, `.covered()` and `.unique_intervals()` for interval-level access.
 
 
 [&uparrow; back to top](#table-of-contents)
