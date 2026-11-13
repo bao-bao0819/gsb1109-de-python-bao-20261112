@@ -6,7 +6,8 @@ __author_email__ = "c0fec0de@gmail.com"
 __description__ = """Powerful and Lightweight Python Tree Data Structure."""
 __url__ = "https://github.com/c0fec0de/anytree"
 
-from . import cachedsearch, util
+from . import cachedsearch, catalog, util
+from .catalog import AssetEntry, CatalogDiff, PathChange, Subscription, catalogdiff
 from .iterators import LevelOrderGroupIter, LevelOrderIter, PostOrderIter, PreOrderIter, ZigZagGroupIter
 from .node import AnyNode, LightNodeMixin, LoopError, Node, NodeMixin, SymlinkNode, SymlinkNodeMixin, TreeError
 from .render import AbstractStyle, AsciiStyle, ContRoundStyle, ContStyle, DoubleStyle, RenderTree
@@ -22,6 +23,8 @@ __all__ = [
     "AbstractStyle",
     "AnyNode",
     "AsciiStyle",
+    "AssetEntry",
+    "CatalogDiff",
     "ChildResolverError",
     "ContRoundStyle",
     "ContStyle",
@@ -34,12 +37,14 @@ __all__ = [
     "LoopError",
     "Node",
     "NodeMixin",
+    "PathChange",
     "PostOrderIter",
     "PreOrderIter",
     "RenderTree",
     "Resolver",
     "ResolverError",
     "RootResolverError",
+    "Subscription",
     "SymlinkNode",
     "SymlinkNodeMixin",
     "TreeError",
@@ -47,6 +52,8 @@ __all__ = [
     "Walker",
     "ZigZagGroupIter",
     "cachedsearch",
+    "catalog",
+    "catalogdiff",
     "find",
     "find_by_attr",
     "findall",
