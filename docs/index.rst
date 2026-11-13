@@ -120,6 +120,31 @@ inserted into the cache.
    This class discards the least recently used items first to make
    space when necessary.
 
+.. autoclass:: PartitionedCache(maxsize, reserved=None, getdataset=None, getsizeof=None)
+   :members: getdataset, last_evicted, owner, popitem, reserved, usage
+
+   This class shares a cache between multiple *datasets*.  The
+   optional `reserved` argument maps each dataset to its reserved
+   size, and each cache item is assigned to a dataset by the
+   `getdataset` function.  As long as the whole cache does not exceed
+   `maxsize`, a dataset may grow beyond its reserved size by
+   borrowing capacity that other datasets leave unused.
+
+   When an insertion requires evictions, items belonging to datasets
+   that currently exceed their reserved size are discarded first, in
+   least recently used order.  If this does not free up enough space,
+   the least recently used items overall are discarded, so a single
+   insertion may evict items from multiple datasets.  Items are
+   evicted as a whole, so an item whose size exceeds
+   :attr:`~Cache.maxsize` cannot be cached at all, and
+   :meth:`Cache.__setitem__` raises :exc:`ValueError` without
+   modifying the cache.
+
+   The :attr:`last_evicted` property holds a tuple of
+   `(key, dataset, size)` triples detailing the items evicted by the
+   most recent insertion, where `size` is the number of bytes
+   actually freed by each eviction.
+
 .. autoclass:: RRCache(maxsize, choice=random.choice, getsizeof=None)
    :members: choice, popitem
 

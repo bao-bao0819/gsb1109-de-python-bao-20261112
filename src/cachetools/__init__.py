@@ -6,6 +6,7 @@ __all__ = (
     "FIFOCache",
     "LFUCache",
     "LRUCache",
+    "PartitionedCache",
     "RRCache",
     "TLRUCache",
     "TTLCache",
@@ -335,6 +336,142 @@ class LRUCache(Cache):
             self.__order.move_to_end(key)
         except KeyError:
             self.__order[key] = None
+
+
+class PartitionedCache(Cache):
+    """LRU cache implementation with per-dataset reserved sizes."""
+
+    def __init__(self, maxsize, reserved=None, getdataset=None, getsizeof=None):
+        Cache.__init__(self, maxsize, getsizeof)
+        if reserved is None:
+            reserved = {}
+        for size in reserved.values():
+            if size < 0:
+                raise ValueError("reserved sizes must be non-negative")
+        self.__reserved = dict(reserved)
+        if getdataset is not None:
+            self.getdataset = getdataset
+        self.__hassize = self.getsizeof is not Cache.getsizeof
+        self.__order = collections.OrderedDict()
+        self.__datasets = {}
+        self.__sizes = {}
+        self.__usage = {dataset: 0 for dataset in self.__reserved}
+        self.__last_evicted = ()
+
+    def __getitem__(self, key, cache_getitem=Cache.__getitem__):
+        value = cache_getitem(self, key)
+        try:
+            self.__order.move_to_end(key)
+        except KeyError:  # __missing__ may not store item
+            pass
+        return value
+
+    def __setitem__(self, key, value, cache_setitem=Cache.__setitem__):
+        maxsize = self.maxsize
+        if self.__hassize:
+            itemsize = self.getsizeof(value)
+            if itemsize > maxsize:
+                raise ValueError("value too large")
+            elif itemsize < 0:
+                raise ValueError("value size must be non-negative")
+        elif maxsize < 1:
+            raise ValueError("value too large")
+        else:
+            itemsize = 1
+        dataset = self.getdataset(key)
+        sizes = self.__sizes
+        diffsize = itemsize - sizes.get(key, 0)
+        evicted = []
+        while self.currsize + diffsize > maxsize:
+            victim = self.__victim()
+            evicted.append((victim, self.__datasets[victim], sizes[victim]))
+            del self[victim]
+            if victim == key:
+                diffsize = itemsize
+        cache_setitem(self, key, value)
+        datasets = self.__datasets
+        usage = self.__usage
+        if key in datasets:
+            usage[datasets.pop(key)] -= sizes.pop(key)
+        datasets[key] = dataset
+        sizes[key] = itemsize
+        usage[dataset] = usage.get(dataset, 0) + itemsize
+        self.__touch(key)
+        self.__last_evicted = tuple(evicted)
+
+    def __delitem__(self, key, cache_delitem=Cache.__delitem__):
+        cache_delitem(self, key)
+        dataset = self.__datasets.pop(key)
+        self.__usage[dataset] -= self.__sizes.pop(key)
+        del self.__order[key]
+
+    @property
+    def reserved(self):
+        """The reserved size of each dataset."""
+        return dict(self.__reserved)
+
+    @property
+    def usage(self):
+        """The current total size of each dataset's items."""
+        return dict(self.__usage)
+
+    @property
+    def last_evicted(self):
+        """The `(key, dataset, size)` items evicted by the most recent
+        insertion.
+
+        """
+        return self.__last_evicted
+
+    @staticmethod
+    def getdataset(key):
+        """Return the dataset the given key belongs to."""
+        return None
+
+    def owner(self, key):
+        """Return the dataset the given key's item belongs to."""
+        return self.__datasets[key]
+
+    def popitem(self):
+        """Remove and return the `(key, value)` pair least recently used,
+        preferring items of datasets that exceed their reserved size.
+
+        """
+        key = self.__victim()
+        if key is None:
+            raise KeyError("%s is empty" % type(self).__name__) from None
+        value = Cache.__getitem__(self, key)
+        del self[key]
+        return (key, value)
+
+    def clear(self):
+        Cache.clear(self)
+        self.__order.clear()
+        self.__datasets.clear()
+        self.__sizes.clear()
+        self.__usage = {dataset: 0 for dataset in self.__reserved}
+        self.__last_evicted = ()
+
+    def __touch(self, key):
+        """Mark as recently used."""
+        try:
+            self.__order.move_to_end(key)
+        except KeyError:
+            self.__order[key] = None
+
+    def __victim(self):
+        """Return the next eviction candidate, or None if empty."""
+        fallback = None
+        datasets = self.__datasets
+        usage = self.__usage
+        reserved = self.__reserved
+        for key in self.__order:
+            if fallback is None:
+                fallback = key
+            dataset = datasets[key]
+            if usage[dataset] > reserved.get(dataset, 0):
+                return key
+        return fallback
 
 
 class RRCache(Cache):
