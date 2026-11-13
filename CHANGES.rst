@@ -4,6 +4,14 @@ Change Log
 Unreleased
 ----------
 
+Adds:
+
+- Adds regroupable variance budgets through ``variance_budget()`` and
+  ``VarianceBudget``. Signed source and cross-source covariance terms can be
+  reported as within-group and between-group contributions; merging or
+  relabelling groups preserves the propagated variance and keeps sources
+  without a group assignment in the budget.
+
 Changes:
 
 - Updates test configuration to run against python versions `3.11` through `3.15`. Previously tests ran against python

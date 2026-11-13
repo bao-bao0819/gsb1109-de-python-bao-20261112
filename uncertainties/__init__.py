@@ -224,6 +224,28 @@ This software is released under the BSD license.
 from .core import *  # noqa
 from .core import __all__  # noqa For a correct help(uncertainties)
 
+from .budget import (  # noqa
+    UNCLASSIFIED,
+    Contribution,
+    VarianceBudget,
+    error_budget,
+    grouped_variance,
+    merge_groups,
+    uncertainty_budget,
+    variance_budget,
+)
+
+__all__ = list(__all__) + [
+    "UNCLASSIFIED",
+    "Contribution",
+    "VarianceBudget",
+    "variance_budget",
+    "error_budget",
+    "uncertainty_budget",
+    "grouped_variance",
+    "merge_groups",
+]
+
 from .version import __version__, __version_tuple__  # noqa
 
 # for backward compatibility

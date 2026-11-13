@@ -420,6 +420,55 @@ The variance of :data:`result` is in fact simply the quadratic sum of
 these two errors, since the variables from
 :func:`result.error_components` are independent.
 
+.. index:: variance budget
+
+Grouped variance budgets
+========================
+
+The :func:`variance_budget` function reports signed variance
+contributions grouped by process or source.  It accepts either a result
+with uncertainties, or an explicit sequence of sensitivities together
+with a covariance matrix.  Every diagonal and cross-source covariance
+term is retained, including negative terms.  Contributions from a group
+with itself are reported in ``within``; contributions between two
+distinct groups are reported in ``between``.
+
+>>> from uncertainties import variance_budget
+>>> sources = ["rate", "scrap", "shared"]
+>>> sensitivities = {"rate": 2.0, "scrap": -1.0, "shared": 1.0}
+>>> covariance = {
+...     ("rate", "rate"): 0.4,
+...     ("scrap", "scrap"): 0.2,
+...     ("shared", "shared"): 0.3,
+...     ("rate", "scrap"): -0.1,
+...     ("rate", "shared"): 0.05,
+... }
+>>> budget = variance_budget(
+...     sensitivities,
+...     covariance,
+...     groups={"rate": "forming", "scrap": "forming"},
+... )
+>>> print(format(budget.total_variance, ".4f"))
+2.7000
+>>> print(format(budget.within["forming"], ".4f"))
+2.2000
+>>> print(format(budget.within[None], ".4f"))
+0.3000
+>>> print(format(budget.between[("forming", None)], ".4f"))
+0.2000
+
+Sources without a group are placed in the ``None`` group and remain part
+of every total.  A budget can be regrouped or have two groups merged;
+when two groups are merged, their former ``between`` contribution is
+transferred into the merged group's ``within`` contribution, and the sum
+of all entries always remains equal to the propagated variance:
+
+>>> merged = budget.merge_groups("forming", None, new_group="all")
+>>> print(format(merged.within["all"], ".4f"))
+2.7000
+>>> print(format(merged.group_sum, ".4f"))
+2.7000
+
 .. index:: comparison operators
 
 
