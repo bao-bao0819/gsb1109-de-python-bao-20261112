@@ -2221,3 +2221,211 @@ def test_read_latin1_shapefile_cpg_file(encoding, context, tmp_latin1_shapefile_
     r.close()
     if encoding == "latin1":
         assert rec == [2, u'Ñandú']
+
+
+# ---------------------------------------------------------------------------
+# Cross-file row identity: null geometry, deleted dbf rows and bbox filtering
+# coexisting in one shapefile, plus value-identical ("twin") features.
+# ---------------------------------------------------------------------------
+
+# oid -> (point inside the bbox filter or None for a null geometry, ID value)
+IDENTITY_FEATURES = [
+    ((0.10, 0.20), 10),  # oid 0, twin of oid 4 (identical geometry + ID)
+    (None, 10),  # oid 1, null geometry
+    ((50.0, 60.0), 30),  # oid 2, outside the bbox filter
+    ((0.30, 0.40), 40),  # oid 3, dbf row marked deleted
+    ((0.10, 0.20), 10),  # oid 4, value-identical twin of oid 0
+]
+DELETED_OID = 3
+BBOX_INSIDE = [0.0, 0.0, 1.0, 1.0]
+
+
+def _build_identity_shapefile(path):
+    """Writes IDENTITY_FEATURES and marks DELETED_OID's dbf row deleted."""
+    with shapefile.Writer(path) as writer:
+        writer.field("ID", "N", size=10)
+        for point, identifier in IDENTITY_FEATURES:
+            writer.record(identifier)
+            if point is None:
+                writer.null()
+            else:
+                writer.point(*point)
+
+    # Flip the one-byte deletion flag (b" " -> b"*") of the deleted dbf row.
+    dbf_path = path + ".dbf"
+    with shapefile.Reader(path) as reader:
+        header_length = reader.dbf_reader._dbfHdrLength
+        record_length = reader.dbf_reader._record_length
+    data = bytearray(Path(dbf_path).read_bytes())
+    data[header_length + DELETED_OID * record_length] = ord("*")
+    Path(dbf_path).write_bytes(data)
+    return path
+
+
+def test_shape_identity_table(tmp_path):
+    """Identity is built from shp record number/offset, shx offset and the
+    dbf physical row position + deletion flag, not from decoded values."""
+    path = _build_identity_shapefile(str(tmp_path / "identity"))
+    with shapefile.Reader(path) as reader:
+        reader.shp_reader.cache_all_headers()
+        header_length = reader.dbf_reader._dbfHdrLength
+        record_length = reader.dbf_reader._record_length
+
+        identities = list(reader.iterShapeIdentities())
+        assert len(identities) == len(IDENTITY_FEATURES)
+        assert reader.firstUnconfirmableOid() is None
+
+        for oid, identity in enumerate(identities):
+            shp_offset, _length, shp_record_number = reader.shp_reader.headers_cache[
+                oid
+            ]
+            assert identity.oid == oid
+            # shp record numbers are one-based
+            assert identity.shp_record_number == shp_record_number == oid + 1
+            # shp and shx must point at the same bytes for the same oid
+            assert identity.shp_offset_B == shp_offset
+            assert identity.shx_offset_B == reader.shx_reader.offsets[oid]
+            assert identity.shp_offset_B == identity.shx_offset_B
+            # dbf physical row counts deleted rows too
+            assert identity.dbf_physical_row == oid
+            assert identity.dbf_offset_B == header_length + oid * record_length
+            expected_flag = b"*" if oid == DELETED_OID else b" "
+            assert identity.deletion_flag == expected_flag
+
+
+def test_identity_distinguishes_value_identical_twins(tmp_path):
+    """The twin features decode to equal geometry and attributes, so a value
+    comparison cannot tell them apart; their physical identities can."""
+    path = _build_identity_shapefile(str(tmp_path / "identity"))
+    with shapefile.Reader(path) as reader:
+        twin_a, twin_b = reader.shape(0), reader.shape(4)
+        assert twin_a.__geo_interface__ == twin_b.__geo_interface__
+        assert reader.record(0) == reader.record(4)
+
+        identity_a, identity_b = reader.shapeIdentity(0), reader.shapeIdentity(4)
+        assert identity_a.shp_offset_B != identity_b.shp_offset_B
+        assert identity_a.shx_offset_B != identity_b.shx_offset_B
+        assert identity_a.dbf_offset_B != identity_b.dbf_offset_B
+        assert identity_a.shp_record_number != identity_b.shp_record_number
+
+
+def test_one_by_one_pairing_matches_identity(tmp_path):
+    """shapeRecord() pairs each geometry with the same-oid attributes,
+    returning None for the deleted row while keeping its position."""
+    path = _build_identity_shapefile(str(tmp_path / "identity"))
+    with shapefile.Reader(path) as reader:
+        for oid in range(len(IDENTITY_FEATURES)):
+            shape_record = reader.shapeRecord(oid)
+            identity = reader.shapeIdentity(oid)
+            assert shape_record.shape.oid == identity.oid == oid
+            if oid == DELETED_OID:
+                assert shape_record.record is None
+                assert identity.deletion_flag == b"*"
+            else:
+                assert shape_record.record is not None
+                assert shape_record.record.oid == oid
+                assert identity.deletion_flag == b" "
+
+
+def test_iter_shape_records_keeps_position_past_deleted_row(tmp_path):
+    """Bulk iteration must not let a deleted dbf row shift later geometries
+    onto the wrong attributes (the two streams align only positionally)."""
+    path = _build_identity_shapefile(str(tmp_path / "identity"))
+    with shapefile.Reader(path) as reader:
+        pairs = list(reader.iterShapeRecords())
+        assert len(pairs) == len(IDENTITY_FEATURES)
+        for oid, shape_record in enumerate(pairs):
+            assert shape_record.shape.oid == oid
+            if oid == DELETED_OID:
+                assert shape_record.record is None
+            else:
+                assert shape_record.record is not None
+                assert shape_record.record.oid == oid
+
+
+def test_bbox_filter_pairing_matches_identity(tmp_path):
+    """Bulk bbox filtering skips only the out-of-bbox feature and still
+    pairs the surviving geometries with their own same-oid attributes."""
+    path = _build_identity_shapefile(str(tmp_path / "identity"))
+    with shapefile.Reader(path) as reader:
+        # null geometry and in-bbox features survive; oid 2 is filtered out
+        outside_as_none = list(
+            reader.iterShapes(bbox=BBOX_INSIDE, outside_bbox_as_None=True)
+        )
+        assert [None if shape is None else shape.oid for shape in outside_as_none] == [
+            0,
+            1,
+            None,
+            3,
+            4,
+        ]
+
+        pairs = list(reader.iterShapeRecords(bbox=BBOX_INSIDE))
+        assert [shape_record.shape.oid for shape_record in pairs] == [0, 1, 3, 4]
+        for shape_record in pairs:
+            oid = shape_record.shape.oid
+            assert shape_record.shape.oid == reader.shapeIdentity(oid).oid
+            if oid == DELETED_OID:
+                assert shape_record.record is None
+            else:
+                assert shape_record.record.oid == oid
+
+
+def test_component_count_mismatch_first_unconfirmable(tmp_path):
+    """When the shx holds fewer entries than the shp/dbf, report the exact
+    first oid whose pairing can no longer be confirmed across components."""
+    path = _build_identity_shapefile(str(tmp_path / "identity"))
+
+    # Truncate the shx to its first 4 index entries and fix its length header.
+    shx_bytes = Path(path + ".shx").read_bytes()
+    truncated = bytearray(shx_bytes[: 100 + 4 * 8])
+    struct.pack_into(">i", truncated, 24, (100 + 4 * 8) // 2)
+
+    with open(path + ".shp", "rb") as shp, open(path + ".dbf", "rb") as dbf:
+        with shapefile.Reader(
+            shp=shp, shx=io.BytesIO(bytes(truncated)), dbf=dbf
+        ) as reader:
+            assert reader.componentCounts() == (5, 4, 5)
+            # oids 0-3 are cross-checkable; oid 4 has no shx entry
+            assert reader.firstUnconfirmableOid() == 4
+            confirmable = list(reader.iterShapeIdentities())
+            assert [identity.oid for identity in confirmable] == [0, 1, 2, 3]
+
+            # The first unconfirmable pair still exists in shp + dbf, but its
+            # shx offset can no longer be confirmed.
+            boundary = reader.shapeIdentity(4)
+            assert boundary.oid == 4
+            assert boundary.shp_offset_B == reader.shp_reader.shape_header(4)[0]
+            assert boundary.shx_offset_B is None
+            assert boundary.dbf_physical_row == 4
+
+
+def test_healthy_components_fully_confirmable(tmp_path):
+    path = _build_identity_shapefile(str(tmp_path / "identity"))
+    with shapefile.Reader(path) as reader:
+        assert reader.componentCounts() == (5, 5, 5)
+        assert reader.firstUnconfirmableOid() is None
+        assert len(list(reader.iterShapeIdentities())) == 5
+
+
+def test_identity_with_missing_or_partial_components(tmp_path):
+    """componentCounts reports None for an absent file rather than raising,
+    and identity reads work without an shx (its offset is then None)."""
+    path = _build_identity_shapefile(str(tmp_path / "identity"))
+
+    with open(path + ".shp", "rb") as shp, open(path + ".dbf", "rb") as dbf:
+        with shapefile.Reader(shp=shp, dbf=dbf) as reader:
+            assert reader.componentCounts() == (5, None, 5)
+            assert reader.firstUnconfirmableOid() is None
+            identity = reader.shapeIdentity(DELETED_OID)
+            assert identity.shx_offset_B is None
+            assert identity.deletion_flag == b"*"
+            assert len(list(reader.iterShapeIdentities())) == 5
+
+    with shapefile.Reader(dbf=open(path + ".dbf", "rb")) as reader:
+        assert reader.componentCounts() == (None, None, 5)
+        with pytest.raises(shapefile.ShapefileException):
+            reader.shapeIdentity(0)
+        with pytest.raises(shapefile.ShapefileException):
+            list(reader.iterShapeIdentities())
+

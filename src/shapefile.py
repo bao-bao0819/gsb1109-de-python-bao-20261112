@@ -3358,6 +3358,19 @@ class DbfReader(_HasCheckedReadableFile):
         recSize = self._record_length
         self.file.seek(self._dbfHdrLength + (index * recSize))
 
+    def physical_row_info(self, index: int) -> tuple[int, bytes]:
+        """Returns the byte offset and raw deletion flag of physical .dbf
+        row ``index``.
+
+        The physical row number counts rows marked deleted (deletion flag
+        ``b"*"``) too, unlike the logical records yielded by
+        :meth:`iterRecords`, which skips them.
+        """
+        self.seek_to_rec(index=index)
+        offset_B = self.file.tell()
+        deletion_flag = self.file.read(1)
+        return offset_B, deletion_flag
+
 
 class ShxReader(_HasCheckedReadableFile):
     """Reads an shx file (a file of file positions
@@ -3412,6 +3425,39 @@ class ShxReader(_HasCheckedReadableFile):
 
 
 ShapeHeaderInfoT = tuple[int, int, int]
+
+
+class ShapeIdentity(NamedTuple):
+    """Physical, on-disk identity of one geometry/attribute pair.
+
+    The three constituent files of a shapefile only agree positionally,
+    so comparing decoded values is not enough to prove that a geometry and
+    its attributes really belong together (two distinct features may hold
+    identical values).  This tuple instead ties a pair together using the
+    immutable physical coordinates of each file:
+
+    * ``oid``: zero-based position shared by the .shp record, the .shx
+      index entry and the .dbf row;
+    * ``shp_record_number``: one-based record number stored in the .shp
+      record header (i.e. ``oid + 1`` for a well-formed file);
+    * ``shp_offset_B`` / ``shx_offset_B``: byte offset of the shape in the
+      .shp file, as read sequentially from the .shp headers and from the
+      .shx index respectively;
+    * ``dbf_physical_row``: zero-based physical row number in the .dbf
+      file, which counts deleted rows too;
+    * ``dbf_offset_B``: byte position at which that .dbf row begins,
+      immediately before its one-byte deletion flag;
+    * ``deletion_flag``: the raw .dbf deletion flag byte (``b" "`` for an
+      active row, ``b"*"`` for a row marked deleted).
+    """
+
+    oid: int
+    shp_record_number: int
+    shp_offset_B: int
+    shx_offset_B: int | None
+    dbf_physical_row: int
+    dbf_offset_B: int
+    deletion_flag: bytes
 
 
 class ShpReader(_HasCheckedReadableFile):
@@ -4283,9 +4329,13 @@ class Reader(_HasExitStack):
         arg as a list or tuple of xmin,ymin,xmax,ymax.
         """
         if bbox is None:
-            # iterate through all shapes and records
+            # Iterate positionally. Keep a None slot for .dbf rows marked
+            # deleted (deletion flag b"*") instead of dropping them, otherwise
+            # every following shape would silently shift onto the wrong
+            # attributes (the two streams are only aligned positionally).
             for shape, record in zip(
-                self.iterShapes(), self.dbf_reader.iterRecords(fields=fields)
+                self.iterShapes(),
+                self.dbf_reader.iterRecords(fields=fields, deleted_as_None=True),
             ):
                 yield ShapeRecord(shape=shape, record=record)
         else:
@@ -4307,6 +4357,96 @@ class Reader(_HasExitStack):
                     last_oid = shape.oid
 
                     yield ShapeRecord(shape=shape, record=record)
+
+    def componentCounts(self) -> tuple[int | None, int | None, int | None]:
+        """Returns the number of entries in each constituent file as
+        ``(shp_count, shx_count, dbf_count)``.
+
+        A component that was not opened reports ``None`` instead of raising,
+        matching the Reader's lazy-loading behaviour.  The .shp count is
+        obtained by reading through the shape headers (cached), so it
+        reflects the shapes actually present on disk, independently of the
+        counts declared in the .shx or .dbf headers.
+        """
+        if self._shp:
+            self.shp_reader.cache_all_headers()
+            shp_count: int | None = len(self.shp_reader.headers_cache)
+        else:
+            shp_count = None
+        shx_count = self.shx_reader.numShapes if self._shx else None
+        dbf_count = self.dbf_reader.numRecords if self._dbf else None
+        return shp_count, shx_count, dbf_count
+
+    def firstUnconfirmableOid(self) -> int | None:
+        """The smallest oid whose geometry/attribute pairing can no longer
+        be confirmed across all present constituent files, or ``None`` when
+        every oid is backed by every present file.
+
+        A pair at oid *i* is only confirmable while a .shp record, a .shx
+        index entry and a .dbf physical row all exist at *i*.  The first oid
+        where any component runs out of entries (e.g. a truncated .shx, or a
+        .dbf with fewer rows than there are shapes) is the boundary: pairs
+        below it are fully cross-checkable, and the pair at this oid is the
+        first that cannot be.
+        """
+        counts = [count for count in self.componentCounts() if count is not None]
+        if not counts or min(counts) == max(counts):
+            return None
+        return min(counts)
+
+    def shapeIdentity(self, oid: int) -> ShapeIdentity:
+        """Builds the physical, cross-file identity of the geometry/
+        attribute pair at ``oid`` from the .shp record number/offset, the
+        .shx offset and the .dbf physical row position and deletion flag.
+
+        Use it to prove that a geometry and a record belong together even
+        when two features hold identical decoded values (which a value
+        comparison cannot distinguish), and to inspect rows marked deleted,
+        whose decoded record is returned as ``None`` while their physical
+        row still exists.  Raises :class:`ShapefileException` if a required
+        constituent file is missing.
+        """
+        if not self._shp:
+            raise ShapefileException(
+                "A .shp file is required to read Shape identities"
+            )
+        if not self._dbf:
+            raise ShapefileException(
+                "A .dbf file is required to read Shape identities"
+            )
+        shp_offset_B, _shape_len_B, shp_record_number = self.shp_reader.shape_header(
+            oid
+        )
+        if self._shx:
+            shx_offsets = self.shx_reader.offsets
+            shx_offset_B = shx_offsets[oid] if oid < len(shx_offsets) else None
+        else:
+            shx_offset_B = None
+        dbf_offset_B, deletion_flag = self.dbf_reader.physical_row_info(oid)
+        return ShapeIdentity(
+            oid=oid,
+            shp_record_number=shp_record_number,
+            shp_offset_B=shp_offset_B,
+            shx_offset_B=shx_offset_B,
+            dbf_physical_row=oid,
+            dbf_offset_B=dbf_offset_B,
+            deletion_flag=deletion_flag,
+        )
+
+    def iterShapeIdentities(self) -> Iterator[ShapeIdentity]:
+        """Yields a :class:`ShapeIdentity` for every oid common to all
+        present constituent files, stopping at the first oid that cannot be
+        confirmed (see :meth:`firstUnconfirmableOid`)."""
+        if not self._shp or not self._dbf:
+            raise ShapefileException(
+                "Both a .shp and a .dbf file are required to read "
+                "Shape identities"
+            )
+        stop = self.firstUnconfirmableOid()
+        if stop is None:
+            stop = len(self.shp_reader.headers_cache)
+        for oid in range(stop):
+            yield self.shapeIdentity(oid)
 
 
 def _is_file_obj_open(f: WriteSeekableBinStream | str | None) -> bool:
