@@ -1,0 +1,143 @@
+ARROW MIGRATION PRE-CHECK
+reference timezone for naive instants: UTC
+swept year range for year-less batches: 1..9999
+==============================================================================
+
+[1] ACCEPTANCE-DOMAIN DIVERGENCES
+  D01 field='2026-01-01 24:00'
+      legacy '%Y-%m-%d %H:%M' -> REJ ValueError
+      arrow  'YYYY-MM-DD HH:mm' -> OK
+      relation=arrow_only  Hour 24 is end-of-day midnight: Arrow rolls to next day 00:00; strptime %H only accepts 00..23.
+  D02 field='2026-01-01 00:00:00.1234567'
+      legacy '%Y-%m-%d %H:%M:%S.%f' -> REJ ValueError
+      arrow  'YYYY-MM-DD HH:mm:ss.S' -> OK
+      relation=arrow_only  %f consumes at most six digits (rest is unconverted data); Arrow S takes arbitrary precision and rounds to microseconds.
+  D03 field='2026-01-01 23:59:59.9999999'
+      legacy '%Y-%m-%d %H:%M:%S.%f' -> REJ ValueError
+      arrow  'YYYY-MM-DD HH:mm:ss.S' -> OK
+      relation=arrow_only  Seven-digit fraction rounds up in Arrow, carrying the instant and the business day onto the next calendar day; strptime rejects the field.
+  D04 field='2026-01-01 00:00:00 CET'
+      legacy '%Y-%m-%d %H:%M:%S %Z' -> REJ ValueError
+      arrow  'YYYY-MM-DD HH:mm:ss ZZZ' -> OK
+      relation=arrow_only  strptime %Z only recognizes a fixed tzname set (UTC/GMT and local names); Arrow ZZZ resolves CET through ZoneInfo.
+  D05 field='2026-01-01 America/New_York'
+      legacy '%Y-%m-%d %Z' -> REJ ValueError
+      arrow  'YYYY-MM-DD ZZZ' -> OK
+      relation=arrow_only  IANA zone names are outside the strptime %Z vocabulary; Arrow ZZZ accepts them and attaches a ZoneInfo object.
+  D06 field='+02'
+      legacy '%z' -> REJ ValueError
+      arrow  'Z' -> OK
+      relation=arrow_only  strptime %z requires at least HHMM; Arrow Z/ZZ accept an hours-only offset and build a fixed timedelta timezone.
+  D07 field=' 2026-01-01'
+      legacy '%Y-%m-%d' -> REJ ValueError
+      arrow  'YYYY-MM-DD' -> OK
+      relation=arrow_only  strptime is anchored and demands a full match; Arrow searches inside the string and tolerates surrounding whitespace or text.
+  D08 field='2026-W01'
+      legacy '%G-W%V' -> REJ ValueError
+      arrow  'W' -> OK
+      relation=arrow_only  ISO %G must be paired with a weekday directive in strptime; Arrow W treats a missing weekday as day 1 of the ISO week.
+  D09 field='15th'
+      legacy '%d' -> REJ ValueError
+      arrow  'Do' -> OK
+      relation=arrow_only  Ordinal day suffixes have no strptime directive; Arrow Do parses '15th', '2nd', ... via the locale ordinal regex.
+  D10 field='1767225600'
+      legacy '%s' -> REJ ValueError
+      arrow  'X' -> OK
+      relation=arrow_only  Unix epoch seconds are not a strptime directive on this platform; Arrow X converts the timestamp directly in UTC.
+  D11 field='2026-01-01 00:30 PM'
+      legacy '%Y-%m-%d %I:%M %p' -> REJ ValueError
+      arrow  'YYYY-MM-DD hh:mm A' -> OK
+      relation=arrow_only  12-hour %I rejects hour 00; Arrow accepts it with a meridiem and maps midnight to 12.
+  D12 field='2026-01-01 00:00:00,5'
+      legacy '%Y-%m-%d %H:%M:%S.%f' -> REJ ValueError
+      arrow  'YYYY-MM-DD HH:mm:ss,S' -> OK
+      relation=arrow_only  strptime sub-seconds require a '.'; Arrow treats the comma as a literal separator before the S token.
+  D13 field='060'
+      legacy '%j' -> OK
+      arrow  'DDDD' -> REJ ParserError
+      relation=legacy_only  Bare day-of-year: strptime defaults the year to 1900; Arrow refuses DDD/DDDD without an explicit YYYY component.
+  D14 field='366'
+      legacy '%j' -> OK
+      arrow  'DDDD' -> REJ ParserError
+      relation=legacy_only  Bare day 366 rolls 1900 forward to 1901-01-01 in strptime; Arrow rejects day-of-year fields that carry no year at all.
+  D15 field='0'
+      legacy '%w' -> OK
+      arrow  'd' -> REJ ParserMatchError
+      relation=legacy_only  strptime %w encodes Sunday as 0; Arrow numeric weekday d is [1-7] Monday-based, so 0 is outside its grammar.
+  D16 field='2026-01-01T00:00:00+0200'
+      legacy '%Y-%m-%dT%H:%M:%S%z' -> OK
+      arrow  'YYYY-MM-DDTHH:mm:ssZZ' -> REJ ParserMatchError
+      relation=legacy_only  One %z directive accepts offsets with and without a colon; Arrow ZZ requires the colon shape (use token Z for the no-colon shape, or register both formats).
+  D17 field='0001-060'
+      legacy '%Y-%j' -> OK
+      arrow  'YYYY-DDDD' -> REJ ParserError
+      relation=legacy_only  Date-range floor on Arrow's day-of-year token: Arrow rebuilds an unpadded '{year}-{doy}' string and calls strptime('%Y-%j') internally, which demands a four-digit year. Years 1..999 parse in stdlib but fail the Arrow DDD/DDDD path, so its effective floor is year 1000.
+
+[2] INSTANT / [3] BUSINESS-DAY DIVERGENCES (BOTH PARSERS ACCEPT)
+  I01 field='03-09'
+      legacy -> 1900-03-09T00:00:00 (naive)
+      arrow  -> 0001-03-09T00:00:00 (naive)
+      instant_equal=False business_day_equal=False awareness_equal=True
+      legacy day=(1900, 3, 9) arrow day=(1, 3, 9)
+      Missing year: strptime injects 1900, Arrow injects year 1. Same month/day, different instant and different business-day year.
+  I02 field='14:30'
+      legacy -> 1900-01-01T14:30:00 (naive)
+      arrow  -> 0001-01-01T14:30:00 (naive)
+      instant_equal=False business_day_equal=False awareness_equal=True
+      legacy day=(1900, 1, 1) arrow day=(1, 1, 1)
+      Missing date components: strptime anchors at 1900-01-01, Arrow at 0001-01-01.
+  I03 field='Monday'
+      legacy -> 1900-01-01T00:00:00 (naive)
+      arrow  -> 1970-01-05T00:00:00 (naive)
+      instant_equal=False business_day_equal=False awareness_equal=True
+      legacy day=(1900, 1, 1) arrow day=(1970, 1, 5)
+      Weekday name alone: strptime takes the first Monday on/after its 1900-01-01 anchor (1900-01-01); Arrow uses the 1970 epoch anchor (1970-01-05). Same weekday, different instant and business day.
+  I04 field='1'
+      legacy -> 1900-01-01T00:00:00 (naive)
+      arrow  -> 0001-01-01T00:00:00 (naive)
+      instant_equal=False business_day_equal=False awareness_equal=True
+      legacy day=(1900, 1, 1) arrow day=(1, 1, 1)
+      Numeric weekday alone: strptime anchors at 1900-01-01. Arrow's single d token matches [1-7] but has no component handler, so the digit is ignored and the empty parts fall back to year 0001.
+  I05 field='2026-01-01 GMT'
+      legacy -> 2026-01-01T00:00:00 (naive)
+      arrow  -> 2026-01-01T00:00:00+00:00
+      instant_equal=True business_day_equal=True awareness_equal=False
+      legacy day=(2026, 1, 1) arrow day=(2026, 1, 1)
+      strptime recognizes GMT but returns a naive datetime; Arrow attaches ZoneInfo('GMT'). Equal UTC instant, but tz-awareness differs, so the instant layer must not be treated as structurally identical.
+
+[4] MISSING-YEAR BATCH CERTIFICATION (no assumed default)
+  B-DEFAULT-1900 field='12-31' recorded_default_year=1900
+      bare field  legacy=OK (1900, 12, 31) arrow=OK (1, 12, 31)
+      Recorded default 1900; migration must supply the year explicitly because Arrow has no strptime-style 1900 fallback.
+  B-NOYEAR-MD field='03-09' recorded_default_year=None
+      bare field  legacy=OK (1900, 3, 9) arrow=OK (1, 3, 9)
+      explicit-year sweep: 9999 years certifiable by BOTH parsers, range 1..9999; raw accepted sets agree: True
+      first rejected years (if any): none
+      Month-day batch with no default year on record.
+  B-NOYEAR-LEAP field='02-29' recorded_default_year=None
+      bare field  legacy=REJ ValueError arrow=REJ ValueError
+      explicit-year sweep: 2424 years certifiable by BOTH parsers, range 4..9996; raw accepted sets agree: True
+      first rejected years (if any): [1, 2, 3, 5, 6, 7]
+      Leap-day batch with no default year on record.
+  B-NOYEAR-DOY field='060' recorded_default_year=None
+      bare field  legacy=OK (1900, 3, 1) arrow=REJ ParserError
+      explicit-year sweep: 9000 years certifiable by BOTH parsers, range 1000..9999; raw accepted sets agree: False
+      range disagreement: legacy-only years 1..999 (999), arrow-only years none (0)
+      first rejected years (if any): [1, 2, 3, 4, 5, 6]
+      Day-of-year batch with no default year; Arrow rejects the bare field.
+  B-NOYEAR-DOY366 field='366' recorded_default_year=None
+      bare field  legacy=OK (1901, 1, 1) arrow=REJ ParserError
+      explicit-year sweep: 8999 years certifiable by BOTH parsers, range 1000..9998; raw accepted sets agree: False
+      range disagreement: legacy-only years 1..999 (999), arrow-only years none (0)
+      first rejected years (if any): [1, 2, 3, 4, 5, 6]
+      Day 366 batch: valid on leap years, rolls over otherwise.
+
+[5] COMPATIBILITY-EVIDENCE LEDGER
+  arrow-only acceptance classes : 12 (D01, D02, D03, D04, D05, D06, D07, D08, D09, D10, D11, D12)
+  legacy-only acceptance classes: 5 (D13, D14, D15, D16, D17)
+  both reject (hard agreement)   : 0
+  both accept but layers differ  : 5 (I01, I02, I03, I04, I05)
+  policy: both-success rows are NOT counted as compatibility evidence;
+          a syntax is certified only when both sides reject together,
+          or both accept with identical epoch instant and business day.
+==============================================================================
