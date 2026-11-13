@@ -882,6 +882,104 @@ all the decorators in this module are thread-safe.
    the time-to-live is set to 600 seconds and :func:`time.monotonic`
    is used to retrieve the current time.
 
+
+*****************************************************************
+:mod:`cachetools.columncache` --- Column group cache selection
+*****************************************************************
+
+.. module:: cachetools.columncache
+
+.. testsetup::
+
+   from cachetools.columncache import (
+       CachedGroup,
+       CachePlan,
+       ColumnCache,
+       ColumnSource,
+       ConflictingColumnsError,
+       plan_column_read,
+   )
+
+This module helps serve repeated reads of different columns of the
+same data partition.  A cache stores *column groups*, each holding
+the columns unpacked from one source revision together with a
+checksum per column.  A new request may be covered by one group, by
+several groups combined, or by unpacking some groups and reading the
+missing columns back from the source.
+
+Every cached group carries a fixed `unpack_cost`, charged at most
+once per request even when several of its columns are used.
+:func:`plan_column_read` enumerates every combination of cached
+groups, adds the cost of supplementing any missing columns, and
+returns the cheapest :class:`CachePlan`.  When `full_remote_cost` is
+provided, reading the whole request from the source is considered as
+well:
+
+.. doctest::
+
+   >>> groups = [
+   ...     CachedGroup("g1", "r1", {"a": 1, "b": 1}, unpack_cost=1.0),
+   ...     CachedGroup("g2", "r1", {"c": 2}, unpack_cost=1.0),
+   ... ]
+   >>> plan = plan_column_read(
+   ...     groups, ("a", "c"), "r1",
+   ...     remote_column_cost=5.0, full_remote_cost=8.0,
+   ... )
+   >>> [group.group_id for group in plan.groups]
+   ['g1', 'g2']
+   >>> plan.hit
+   True
+   >>> plan.total_cost
+   2.0
+
+Groups from revisions other than the requested one are ignored.
+Groups of the requested revision may overlap, but when two of them
+carry different checksum values for the same column, the data cannot
+be combined into a successful hit and :func:`plan_column_read`
+raises :exc:`ConflictingColumnsError`:
+
+.. doctest::
+
+   >>> plan_column_read(
+   ...     [CachedGroup("g1", "r1", {"a": 1}),
+   ...      CachedGroup("g2", "r1", {"a": 2})],
+   ...     ("a",), "r1",
+   ... )
+   Traceback (most recent call last):
+   ...
+   cachetools.columncache.ConflictingColumnsError: conflicting checksums for column 'a': (1, 2) (groups ('g1', 'g2'))
+
+The returned plan keeps remote columns in the order in which they
+were first requested and drops duplicates, so the caller can rebuild
+a result whose column order and repeated columns match its original
+request.
+
+.. autoclass:: CachedGroup(group_id, revision, checksums, unpack_cost=1.0, payload=None)
+   :members:
+
+.. autoclass:: CachePlan
+   :members:
+
+.. autoexception:: ConflictingColumnsError
+   :members:
+
+.. autofunction:: plan_column_read
+
+:class:`ColumnCache` drives an actual read.  It stores groups per
+partition, executes the plan returned by :func:`plan_column_read`,
+unpacks the selected groups through its :class:`ColumnSource`, and
+supplements missing columns with a source read.  A checksum conflict
+makes it fall back to reading the whole request from the source.
+Subclass :class:`ColumnSource` to provide :meth:`~ColumnSource.read`
+and, optionally, checksum values so that remote results are stored
+back as new groups:
+
+.. autoclass:: ColumnSource
+   :members:
+
+.. autoclass:: ColumnCache(source, default_unpack_cost=1.0)
+   :members:
+
 .. _@lru_cache: https://docs.python.org/3/library/functools.html#functools.lru_cache
 .. _cache algorithm: https://en.wikipedia.org/wiki/Cache_algorithms
 .. _cache stampede: https://en.wikipedia.org/wiki/Cache_stampede
