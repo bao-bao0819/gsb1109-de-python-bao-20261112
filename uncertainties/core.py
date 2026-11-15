@@ -16,7 +16,7 @@ from __future__ import division  # Many analytical derivatives depend on this
 
 from builtins import str, zip, range, object
 import functools
-from math import sqrt, isfinite  # Optimization: no attribute look-up
+from math import sqrt, isfinite, fsum, isnan  # Optimization: no attribute look-up
 from warnings import warn
 
 import copy
@@ -61,6 +61,14 @@ __all__ = [
     "correlated_values",
     "correlated_values_norm",
     "correlation_matrix",
+    "CovarianceConflict",
+    "CovarianceCompletion",
+    "covariance_completion_bounds",
+    "partial_covariance_bounds",
+    "covariance_bounds",
+    "linear_combination_variance_bounds",
+    "partial_covariance_variance_bounds",
+    "variance_bounds",
 ]
 
 ###############################################################################
@@ -231,6 +239,766 @@ def correlation_matrix(nums_with_uncert):
     std_devs = numpy.sqrt(cov_mat.diagonal())
 
     return cov_mat / std_devs / std_devs[numpy.newaxis].T
+
+
+class CovarianceConflict(ValueError):
+    """
+    Raised when the known entries of a partial covariance matrix cannot
+    belong to any positive-semidefinite covariance matrix.
+
+    The offending columns are available as ``conflict_columns`` (a tuple
+    of column-label tuples), ``conflicts`` (a tuple of index tuples) and
+    ``reasons``.  A diagonal entry is reported as a one-column conflict;
+    a pair of incompatible off-diagonal entries is reported as the
+    corresponding two-column conflict.  If a fully specified 3x3 matrix
+    has a negative determinant, the conflict involves all three columns.
+    """
+
+    def __init__(self, conflicts, columns=None):
+        if columns is None:
+            columns = (0, 1, 2)
+        self.columns = tuple(columns)
+        self.conflicts = tuple(tuple(indices) for indices, _reason in conflicts)
+        self.reasons = tuple(reason for _indices, reason in conflicts)
+        self.conflict_columns = tuple(
+            tuple(self.columns[index] for index in indices)
+            for indices in self.conflicts
+        )
+        described = ", ".join(
+            "%s (%s)" % (labels, reason)
+            for labels, reason in zip(self.conflict_columns, self.reasons)
+        )
+        super().__init__("Conflicting covariance entries: " + described)
+
+
+def _covariance_missing(value):
+    """Return True for the supported spellings of a missing entry."""
+
+    if value is None:
+        return True
+    try:
+        return bool(isnan(value))
+    except TypeError:
+        return False
+
+
+def _covariance_tolerance(first, second, rtol, atol):
+    scale = max(abs(first), abs(second))
+    return atol + rtol * scale
+
+
+def _covariance_rank(matrix):
+    """
+    Rank of a small matrix, with a scale-aware tolerance.
+
+    This avoids requiring NumPy for the diagnostics attached to a
+    covariance completion.
+    """
+
+    rows = [[float(value) for value in row] for row in matrix]
+    scale = max(abs(value) for row in rows for value in row)
+    if scale == 0:
+        return 0
+    tolerance = 1e-9 * scale
+    rank = 0
+    for column in range(len(rows)):
+        pivot = max(range(rank, len(rows)), key=lambda row: abs(rows[row][column]))
+        if abs(rows[pivot][column]) <= tolerance:
+            continue
+        rows[rank], rows[pivot] = rows[pivot], rows[rank]
+        pivot_value = rows[rank][column]
+        for row in range(len(rows)):
+            if row == rank:
+                continue
+            factor = rows[row][column] / pivot_value
+            if factor:
+                for other_column in range(column, len(rows)):
+                    rows[row][other_column] -= factor * rows[rank][other_column]
+        rank += 1
+    return rank
+
+
+class CovarianceCompletion:
+    """
+    Result of :func:`covariance_completion_bounds`.
+
+    The attributes most useful to callers are:
+
+    ``completion_interval``
+        The closed interval of values that the missing off-diagonal
+        covariance can take while the completed 3x3 matrix remains
+        positive semidefinite.
+
+    ``variance_min`` and ``variance_max``
+        The attainable extrema of the variance of the requested linear
+        combination.  They are ``None`` when no weights were supplied.
+
+    ``completion_at_min`` and ``completion_at_max``
+        The missing covariance value that realizes each variance
+        extremum.  When the variance does not depend on the missing
+        entry, the two interval endpoints are reported.  For a fully
+        specified matrix these are ``None``.
+
+    ``covariance_at_min`` and ``covariance_at_max``
+        The corresponding fully completed 3x3 covariance matrices.
+
+    ``missing_pair``
+        The pair of zero-based indices whose covariance was missing, or
+        ``None`` for a fully specified matrix.
+
+    ``completion_interval`` is ``(None, None)`` for a fully specified
+    matrix because there is nothing to complete.
+    """
+
+    __slots__ = (
+        "columns",
+        "missing_pair",
+        "completion_interval",
+        "weights",
+        "variance_min",
+        "variance_max",
+        "completion_at_min",
+        "completion_at_max",
+        "rank_lower",
+        "rank_upper",
+        "is_fixed",
+        "is_constant",
+        "lower",
+        "upper",
+        "_variances",
+        "_known_covariances",
+        "_atol",
+        "_rtol",
+    )
+
+    def __init__(
+        self,
+        columns,
+        missing_pair,
+        completion_interval,
+        variances,
+        known_covariances,
+        weights=None,
+        variance_min=None,
+        variance_max=None,
+        completion_at_min=None,
+        completion_at_max=None,
+        rank_lower=0,
+        rank_upper=0,
+        is_fixed=False,
+        is_constant=False,
+        atol=0.0,
+        rtol=1e-12,
+    ):
+        self.columns = tuple(columns)
+        self.missing_pair = missing_pair
+        self.completion_interval = tuple(completion_interval)
+        self._variances = tuple(variances)
+        self._known_covariances = dict(known_covariances)
+        self.weights = None if weights is None else tuple(weights)
+        self.lower, self.upper = completion_interval
+        self.variance_min = variance_min
+        self.variance_max = variance_max
+        self.completion_at_min = completion_at_min
+        self.completion_at_max = completion_at_max
+        self.rank_lower = rank_lower
+        self.rank_upper = rank_upper
+        self.is_fixed = is_fixed
+        self.is_constant = is_constant
+        self._atol = atol
+        self._rtol = rtol
+        for name in (
+            "lower",
+            "upper",
+            "variance_min",
+            "variance_max",
+            "completion_at_min",
+            "completion_at_max",
+        ):
+            value = getattr(self, name)
+            if value is not None and not isfinite(value):
+                raise ValueError("covariance bounds must be finite")
+
+    @property
+    def variance_interval(self):
+        """Attainable ``(minimum, maximum)`` variance, or ``None``."""
+
+        if self.variance_min is None:
+            return None
+        return (self.variance_min, self.variance_max)
+
+    @property
+    def completion_lower(self):
+        """Lower endpoint of the feasible missing covariance."""
+
+        return self.completion_interval[0]
+
+    @property
+    def completion_upper(self):
+        """Upper endpoint of the feasible missing covariance."""
+
+        return self.completion_interval[1]
+
+    @property
+    def rank_at_min(self):
+        """Rank of the completion that gives the minimum variance."""
+
+        if self.weights is None:
+            return self.rank_lower
+        if self.completion_at_min == self.completion_lower:
+            return self.rank_lower
+        return self.rank_upper
+
+    @property
+    def rank_at_max(self):
+        """Rank of the completion that gives the maximum variance."""
+
+        if self.weights is None:
+            return self.rank_upper
+        if self.completion_at_max == self.completion_upper:
+            return self.rank_upper
+        return self.rank_lower
+
+    @property
+    def rank_deficient_at_min(self):
+        return self.rank_at_min < 3
+
+    @property
+    def rank_deficient_at_max(self):
+        return self.rank_at_max < 3
+
+    def completed_covariance(self, covariance=None):
+        """
+        Return the full covariance matrix for a chosen missing entry.
+
+        If ``covariance`` is omitted, the lower endpoint of the feasible
+        interval is used.  The returned matrix is a list of lists.
+        """
+
+        if covariance is None and self.missing_pair is not None:
+            covariance = self.completion_lower
+
+        matrix = [
+            [self._variances[row] if row == column else 0.0 for column in range(3)]
+            for row in range(3)
+        ]
+        for (row, column), value in self._known_covariances.items():
+            matrix[row][column] = value
+            matrix[column][row] = value
+        if self.missing_pair is not None:
+            row, column = self.missing_pair
+            covariance = float(covariance)
+            matrix[row][column] = covariance
+            matrix[column][row] = covariance
+        return matrix
+
+    def variance_for(self, covariance):
+        """Variance of the requested combination for a chosen completion."""
+
+        if self.weights is None:
+            raise ValueError("Variance bounds require a weight for each column.")
+
+        total = fsum(
+            weight * weight * variance
+            for weight, variance in zip(self.weights, self._variances)
+        )
+        total += 2 * fsum(
+            self.weights[row] * self.weights[column] * value
+            for (row, column), value in self._known_covariances.items()
+        )
+        if self.missing_pair is not None:
+            row, column = self.missing_pair
+            total += 2 * self.weights[row] * self.weights[column] * float(covariance)
+        return total
+
+    @property
+    def covariance_at_min(self):
+        """Completed matrix attaining ``variance_min`` (or ``None``)."""
+
+        if self.variance_min is None:
+            return None
+        if self.completion_at_min is None:
+            return self.completed_covariance()
+        return self.completed_covariance(self.completion_at_min)
+
+    @property
+    def covariance_at_max(self):
+        """Completed matrix attaining ``variance_max`` (or ``None``)."""
+
+        if self.variance_max is None:
+            return None
+        if self.completion_at_max is None:
+            return self.completed_covariance()
+        return self.completed_covariance(self.completion_at_max)
+
+    def as_dict(self):
+        """Return a plain, serializable summary of the result."""
+
+        return {
+            "columns": self.columns,
+            "missing_pair": self.missing_pair,
+            "missing_columns": (
+                None
+                if self.missing_pair is None
+                else tuple(self.columns[index] for index in self.missing_pair)
+            ),
+            "completion_interval": self.completion_interval,
+            "completion_at_min": self.completion_at_min,
+            "completion_at_max": self.completion_at_max,
+            "variance_min": self.variance_min,
+            "variance_max": self.variance_max,
+            "rank_lower": self.rank_lower,
+            "rank_upper": self.rank_upper,
+            "is_fixed": self.is_fixed,
+            "is_constant": self.is_constant,
+        }
+
+    def __iter__(self):
+        yield self.variance_min
+        yield self.variance_max
+        yield self.completion_at_min
+        yield self.completion_at_max
+
+    def __repr__(self):
+        return (
+            "CovarianceCompletion(columns=%r, missing_pair=%r, "
+            "completion_interval=%r, variance_interval=%r)"
+            % (
+                self.columns,
+                self.missing_pair,
+                self.completion_interval,
+                self.variance_interval,
+            )
+        )
+
+
+def covariance_completion_bounds(
+    covariance,
+    weights=None,
+    *,
+    columns=None,
+    atol=0.0,
+    rtol=1e-12,
+):
+    """
+    Bound a linear-combination variance over all positive-semidefinite
+    completions of a 3x3 covariance matrix with one missing off-diagonal.
+
+    ``covariance`` must be a 3x3 array-like.  Its diagonal contains the
+    variances (the squares of the supplied standard deviations).  Exactly
+    one off-diagonal pair may be missing; represent a missing entry with
+    ``None`` or ``NaN``.  A missing mirrored entry is filled from the
+    value that is present.  Supplying a complete matrix is also accepted;
+    its missing interval then collapses to the known value.
+
+    ``weights`` contains the three coefficients of the linear aggregate
+    ``sum(weights[i] * X[i])``.  The variance of this aggregate is affine
+    in the missing covariance, so its extrema occur at the two endpoints
+    of the feasible interval.  If ``weights`` is ``None``, only the
+    feasible completion interval is returned.
+
+    ``columns`` gives optional labels used when reporting a conflict.
+
+    The full 3x3 matrix is positive semidefinite if and only if all its
+    principal minors are nonnegative.  With one missing entry, the
+    pairwise constraints on the known entries are checked first, then the
+    remaining determinant inequality gives a closed interval for the
+    missing value.  A zero-variance column is handled by the Schur
+    complement limit rather than by dividing by zero; rank-deficient but
+    compatible inputs are therefore accepted.
+
+    Returns a :class:`CovarianceCompletion`.  If the known entries cannot
+    be completed, :class:`CovarianceConflict` is raised and its
+    ``conflict_columns`` attribute identifies the offending columns.
+    """
+
+    if columns is None:
+        columns = (0, 1, 2)
+    else:
+        columns = tuple(columns)
+        if len(columns) != 3:
+            raise ValueError("columns must contain exactly three labels")
+
+    try:
+        rows = [list(row) for row in covariance]
+    except TypeError:
+        raise TypeError("covariance must be a 3x3 array-like object") from None
+    if len(rows) != 3 or any(len(row) != 3 for row in rows):
+        raise ValueError("covariance must be a 3x3 array-like object")
+
+    conflicts = []
+
+    variances = []
+    for index in range(3):
+        value = rows[index][index]
+        if _covariance_missing(value):
+            raise ValueError("the covariance diagonal cannot be missing")
+        value = float(value)
+        if value < 0:
+            if value < -atol:
+                conflicts.append(((index,), "negative variance"))
+                continue
+            value = 0.0
+        variances.append(value)
+
+    if conflicts:
+        raise CovarianceConflict(conflicts, columns)
+
+    known_covariances = {}
+    missing_pairs = []
+    for row in range(3):
+        for column in range(row + 1, 3):
+            first = rows[row][column]
+            second = rows[column][row]
+            first_missing = _covariance_missing(first)
+            second_missing = _covariance_missing(second)
+
+            if first_missing and second_missing:
+                missing_pairs.append((row, column))
+                continue
+            if first_missing:
+                value = float(second)
+            elif second_missing:
+                value = float(first)
+            else:
+                first = float(first)
+                second = float(second)
+                tolerance = _covariance_tolerance(first, second, rtol, atol)
+                if abs(first - second) > tolerance:
+                    conflicts.append(((row, column), "asymmetric entries"))
+                    continue
+                value = (first + second) / 2.0
+            known_covariances[(row, column)] = value
+
+    if len(missing_pairs) > 1:
+        raise ValueError(
+            "exactly one off-diagonal covariance pair must be missing; "
+            "missing pairs are %r" % (tuple(missing_pairs),)
+        )
+    missing_pair = missing_pairs[0] if missing_pairs else None
+
+    for (row, column), value in known_covariances.items():
+        bound = sqrt(variances[row] * variances[column])
+        tolerance = atol + rtol * max(bound, abs(value))
+        if abs(value) > bound + tolerance:
+            conflicts.append(
+                ((row, column), "outside the pairwise PSD bound %g" % bound)
+            )
+
+    if conflicts:
+        raise CovarianceConflict(conflicts, columns)
+
+    if missing_pair is None:
+        lower = upper = None
+
+        determinant = (
+            variances[0] * variances[1] * variances[2]
+            + 2
+            * known_covariances[(0, 1)]
+            * known_covariances[(0, 2)]
+            * known_covariances[(1, 2)]
+            - variances[0] * known_covariances[(1, 2)] ** 2
+            - variances[1] * known_covariances[(0, 2)] ** 2
+            - variances[2] * known_covariances[(0, 1)] ** 2
+        )
+        determinant_scale = max(
+            variances[0] * variances[1] * variances[2],
+            variances[0] * known_covariances[(1, 2)] ** 2,
+            variances[1] * known_covariances[(0, 2)] ** 2,
+            variances[2] * known_covariances[(0, 1)] ** 2,
+        )
+        determinant_tolerance = atol + rtol * determinant_scale
+        if determinant < -determinant_tolerance:
+            raise CovarianceConflict(
+                [((0, 1, 2), "the three known pairs are jointly infeasible")],
+                columns,
+            )
+    else:
+        missing_row, missing_column = missing_pair
+        third = 3 - missing_row - missing_column
+
+        third_to_missing_row = known_covariances[
+            (min(third, missing_row), max(third, missing_row))
+        ]
+        third_to_missing_column = known_covariances[
+            (min(third, missing_column), max(third, missing_column))
+        ]
+
+        pairwise_bound = sqrt(variances[missing_row] * variances[missing_column])
+
+        if variances[third] > 0:
+            left = variances[third] * variances[missing_row] - third_to_missing_row**2
+            right = (
+                variances[third] * variances[missing_column]
+                - third_to_missing_column**2
+            )
+            schur_scale = max(
+                variances[third] * variances[missing_row],
+                third_to_missing_row**2,
+                variances[third] * variances[missing_column],
+                third_to_missing_column**2,
+            )
+            schur_tolerance = atol + rtol * schur_scale
+            if left < -schur_tolerance or right < -schur_tolerance:
+                conflicts.append(
+                    (
+                        (third, missing_row if left < 0 else missing_column),
+                        "the Schur complement is not positive semidefinite",
+                    )
+                )
+                raise CovarianceConflict(conflicts, columns)
+            left = max(left, 0.0)
+            right = max(right, 0.0)
+            center = third_to_missing_row * third_to_missing_column / variances[third]
+            half_width = sqrt(left * right) / variances[third]
+            lower = center - half_width
+            upper = center + half_width
+        else:
+            # A zero-variance column must be uncorrelated with every other
+            # column.  What remains is the 2x2 covariance block.
+            tolerance = atol
+            zero_conflicts = []
+            if abs(third_to_missing_row) > tolerance:
+                zero_conflicts.append(
+                    ((third, missing_row), "zero-variance column is correlated")
+                )
+            if abs(third_to_missing_column) > tolerance:
+                zero_conflicts.append(
+                    ((third, missing_column), "zero-variance column is correlated")
+                )
+            if zero_conflicts:
+                raise CovarianceConflict(zero_conflicts, columns)
+            lower = -pairwise_bound
+            upper = pairwise_bound
+
+        lower = max(lower, -pairwise_bound)
+        upper = min(upper, pairwise_bound)
+        interval_tolerance = atol + rtol * max(abs(lower), abs(upper), pairwise_bound)
+        if lower > upper + interval_tolerance:
+            raise CovarianceConflict(
+                [
+                    (
+                        (0, 1, 2),
+                        "the pairwise constraints leave no feasible completion",
+                    )
+                ],
+                columns,
+            )
+        if lower > upper:
+            lower = upper = (lower + upper) / 2.0
+
+    if missing_pair is not None:
+        fixed_tolerance = atol + rtol * max(abs(lower), abs(upper))
+        is_fixed = abs(upper - lower) <= fixed_tolerance
+    else:
+        is_fixed = True
+
+    lower_matrix = [
+        [variances[row] if row == column else 0.0 for column in range(3)]
+        for row in range(3)
+    ]
+    for (row, column), value in known_covariances.items():
+        lower_matrix[row][column] = value
+        lower_matrix[column][row] = value
+    if missing_pair is not None:
+        row, column = missing_pair
+        lower_matrix[row][column] = lower
+        lower_matrix[column][row] = lower
+    rank_lower = _covariance_rank(lower_matrix)
+
+    if missing_pair is not None:
+        upper_matrix = [row[:] for row in lower_matrix]
+        row, column = missing_pair
+        upper_matrix[row][column] = upper
+        upper_matrix[column][row] = upper
+        rank_upper = _covariance_rank(upper_matrix)
+    else:
+        rank_upper = rank_lower
+
+    if weights is None:
+        return CovarianceCompletion(
+            columns,
+            missing_pair,
+            (lower, upper) if missing_pair is not None else (None, None),
+            variances,
+            known_covariances,
+            rank_lower=rank_lower,
+            rank_upper=rank_upper,
+            is_fixed=is_fixed,
+            atol=atol,
+            rtol=rtol,
+        )
+
+    weights = tuple(float(weight) for weight in weights)
+    if len(weights) != 3:
+        raise ValueError("weights must contain exactly three coefficients")
+
+    constant_term = fsum(
+        weight * weight * variance for weight, variance in zip(weights, variances)
+    )
+    constant_term += 2 * fsum(
+        weights[row] * weights[column] * value
+        for (row, column), value in known_covariances.items()
+    )
+
+    if missing_pair is None:
+        return CovarianceCompletion(
+            columns,
+            None,
+            (None, None),
+            variances,
+            known_covariances,
+            weights=weights,
+            variance_min=constant_term,
+            variance_max=constant_term,
+            rank_lower=rank_lower,
+            rank_upper=rank_upper,
+            is_fixed=True,
+            is_constant=True,
+            atol=atol,
+            rtol=rtol,
+        )
+
+    row, column = missing_pair
+    slope = 2.0 * weights[row] * weights[column]
+
+    value_lower = constant_term + slope * lower
+    value_upper = constant_term + slope * upper
+    variance_tolerance = atol + rtol * max(
+        abs(constant_term), abs(value_lower), abs(value_upper)
+    )
+
+    def clean_variance(value):
+        if value < 0 and value >= -variance_tolerance:
+            return 0.0
+        return value
+
+    value_lower = clean_variance(value_lower)
+    value_upper = clean_variance(value_upper)
+
+    if slope > 0:
+        variance_min, completion_at_min = value_lower, lower
+        variance_max, completion_at_max = value_upper, upper
+    elif slope < 0:
+        variance_min, completion_at_min = value_upper, upper
+        variance_max, completion_at_max = value_lower, lower
+    else:
+        variance_min = variance_max = constant_term
+        completion_at_min, completion_at_max = lower, upper
+
+    if variance_min > variance_max:
+        variance_min, variance_max = variance_max, variance_min
+        completion_at_min, completion_at_max = (
+            completion_at_max,
+            completion_at_min,
+        )
+
+    return CovarianceCompletion(
+        columns,
+        missing_pair,
+        (lower, upper),
+        variances,
+        known_covariances,
+        weights=weights,
+        variance_min=variance_min,
+        variance_max=variance_max,
+        completion_at_min=completion_at_min,
+        completion_at_max=completion_at_max,
+        rank_lower=rank_lower,
+        rank_upper=rank_upper,
+        is_fixed=is_fixed,
+        is_constant=(slope == 0.0),
+        atol=atol,
+        rtol=rtol,
+    )
+
+
+def partial_covariance_bounds(
+    std_devs,
+    covariances,
+    weights=None,
+    *,
+    columns=None,
+    atol=0.0,
+    rtol=1e-12,
+):
+    """
+    Convenience wrapper for a supplier table of standard deviations and
+    a partial dictionary of pairwise covariances.
+
+    ``std_devs`` is a sequence of three standard deviations; its squares
+    form the covariance diagonal.  ``covariances`` maps zero-based column
+    pairs, such as ``(0, 1)``, to their covariance.  Exactly one of the
+    three off-diagonal pairs must be absent (or mapped to ``None``/``NaN``).
+    Keys may be given in either order.
+
+    The remaining arguments are those of
+    :func:`covariance_completion_bounds`.
+    """
+
+    std_devs = tuple(float(value) for value in std_devs)
+    if len(std_devs) != 3:
+        raise ValueError("std_devs must contain exactly three values")
+    if any(value < 0 for value in std_devs):
+        raise ValueError("standard deviations cannot be negative")
+
+    matrix = [[None, None, None] for _ in range(3)]
+    for index, value in enumerate(std_devs):
+        matrix[index][index] = value * value
+
+    supplied = {}
+    for key, value in dict(covariances).items():
+        try:
+            row, column = key
+        except (TypeError, ValueError):
+            raise ValueError(
+                "covariance keys must be (row, column) index pairs"
+            ) from None
+        row = int(row)
+        column = int(column)
+        if row == column or not (0 <= row < 3 and 0 <= column < 3):
+            raise ValueError("covariance keys must be distinct indices in 0..2")
+        pair = (min(row, column), max(row, column))
+        previous = supplied.get(pair)
+        if pair in supplied:
+            previous_missing = _covariance_missing(previous)
+            value_missing = _covariance_missing(value)
+            if previous_missing and value_missing:
+                value = None
+            elif previous_missing:
+                value = value
+            elif value_missing:
+                value = previous
+            else:
+                tolerance = _covariance_tolerance(previous, value, rtol, atol)
+                if abs(previous - value) > tolerance:
+                    raise ValueError(
+                        "covariance pair %r is supplied twice with different values"
+                        % (pair,)
+                    )
+                value = (previous + value) / 2.0
+        supplied[pair] = value
+
+    for (row, column), value in supplied.items():
+        matrix[row][column] = value
+        matrix[column][row] = value
+
+    return covariance_completion_bounds(
+        matrix,
+        weights,
+        columns=columns,
+        atol=atol,
+        rtol=rtol,
+    )
+
+
+# Descriptive aliases for the same completion operation.  They are kept
+# as assignments (rather than wrappers) so that their signatures and
+# docstrings cannot drift from the implementation.
+covariance_bounds = covariance_completion_bounds
+linear_combination_variance_bounds = covariance_completion_bounds
+partial_covariance_variance_bounds = partial_covariance_bounds
+variance_bounds = covariance_completion_bounds
 
 
 ########################################
@@ -580,7 +1348,7 @@ class AffineScalarFunc(object):
             # here:
             return (value - self._nominal_value) / self.std_dev
         except ZeroDivisionError:
-            raise ValueError("The standard deviation is zero:" " undefined result")
+            raise ValueError("The standard deviation is zero: undefined result")
 
     def __deepcopy__(self, memo):
         """

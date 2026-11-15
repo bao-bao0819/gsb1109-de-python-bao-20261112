@@ -1072,6 +1072,265 @@ def test_covariances():
 
 
 ###############################################################################
+# Completion of a 3x3 covariance matrix with one missing off-diagonal pair.
+
+
+def _psd_min_eigenvalue(matrix):
+    """Smallest eigenvalue, written out to avoid requiring SciPy."""
+
+    # Trigonometric solution of the symmetric 3x3 eigenvalue problem;
+    # this is only a test helper and avoids a SciPy dependency.
+    a, b, c = matrix[0][0], matrix[0][1], matrix[0][2]
+    d, e = matrix[1][1], matrix[1][2]
+    f = matrix[2][2]
+    p1 = b * b + c * c + e * e
+    q = (a + d + f) / 3.0
+    p2 = (a - q) ** 2 + (d - q) ** 2 + (f - q) ** 2 + 2 * p1
+    p = math.sqrt(p2 / 6.0)
+    if p == 0:
+        return q
+    B = [
+        [(matrix[i][j] - (q if i == j else 0)) / p for j in range(3)] for i in range(3)
+    ]
+    determinant = (
+        B[0][0] * (B[1][1] * B[2][2] - B[1][2] * B[2][1])
+        - B[0][1] * (B[1][0] * B[2][2] - B[1][2] * B[2][0])
+        + B[0][2] * (B[1][0] * B[2][1] - B[1][1] * B[2][0])
+    )
+    r = determinant / 2.0
+    r = max(-1.0, min(1.0, r))
+    phi = math.acos(r) / 3.0
+    return q + 2 * p * math.cos(phi + 2 * math.pi / 3)
+
+
+def test_covariance_completion_interval_and_endpoints():
+    """The feasible interval is exactly the set of PSD completions."""
+
+    covariance = [
+        [4.0, 3.0, -2.0],
+        [3.0, 9.0, None],
+        [-2.0, None, 16.0],
+    ]
+    result = uncert_core.covariance_completion_bounds(covariance, [0.0, 1.0, 1.0])
+
+    assert result.missing_pair == (1, 2)
+    lower, upper = result.completion_interval
+    assert lower < 0 < upper
+
+    # The endpoints are exactly rank-deficient completions.
+    for completion in (lower, upper):
+        matrix = result.completed_covariance(completion)
+        assert matrix[1][2] == completion
+        assert matrix[2][1] == completion
+        assert _psd_min_eigenvalue(matrix) > -1e-12
+
+    # A variance that grows with the missing covariance is extremal at
+    # the two ends of the feasible interval.
+    assert nan_close(result.variance_min, result.variance_for(lower))
+    assert nan_close(result.variance_max, result.variance_for(upper))
+    assert nan_close(result.completion_at_min, lower)
+    assert nan_close(result.completion_at_max, upper)
+    assert nan_close(result.variance_min, 25.0 - 2 * abs(lower))
+    assert nan_close(result.variance_max, 25.0 + 2 * abs(upper))
+
+
+def test_covariance_completion_variance_can_be_non_monotone():
+    """The requested variance need not increase with the missing entry."""
+
+    covariance = [
+        [4.0, 3.0, -2.0],
+        [3.0, 9.0, None],
+        [-2.0, None, 16.0],
+    ]
+    result = uncert_core.covariance_completion_bounds(covariance, [1.0, -2.0, 0.0])
+
+    # Coefficient product is zero here, so the variance is independent
+    # of the missing pair and both endpoints report the same value.
+    assert result.is_constant
+    assert nan_close(result.variance_min, result.variance_max)
+    assert nan_close(result.variance_min, result.variance_for(0.0))
+
+    result = uncert_core.covariance_completion_bounds(covariance, [1.0, -1.0, 1.0])
+    assert not result.is_constant
+    assert nan_close(result.variance_min, result.variance_for(result.completion_at_min))
+    assert nan_close(result.variance_max, result.variance_for(result.completion_at_max))
+    assert result.variance_min <= result.variance_max
+    assert result.completion_at_min == result.completion_interval[1]
+    assert result.completion_at_max == result.completion_interval[0]
+
+
+def test_covariance_completion_missing_pair_positions():
+    """Every one of the three off-diagonal positions is supported."""
+
+    complete = uncert_core.covariance_completion_bounds(
+        [
+            [4.0, 2.0, -1.0],
+            [2.0, 9.0, 3.0],
+            [-1.0, 3.0, 16.0],
+        ],
+        [1.0, 2.0, 3.0],
+    )
+    assert complete.missing_pair is None
+    assert complete.completion_interval == (None, None)
+    expected_variance = complete.variance_min
+
+    for pair in ((0, 1), (0, 2), (1, 2)):
+        matrix = [
+            [4.0, 2.0, -1.0],
+            [2.0, 9.0, 3.0],
+            [-1.0, 3.0, 16.0],
+        ]
+        matrix_value = matrix[pair[0]][pair[1]]
+        matrix[pair[0]][pair[1]] = None
+        matrix[pair[1]][pair[0]] = None
+        result = uncert_core.covariance_completion_bounds(matrix, [1.0, 2.0, 3.0])
+        assert result.missing_pair == pair
+        assert nan_close(result.variance_for(matrix_value), expected_variance)
+
+
+def test_covariance_completion_zero_variance():
+    """Zero variance columns follow the Schur-complement limit."""
+
+    covariance = [
+        [4.0, None, 0.0],
+        [None, 9.0, 0.0],
+        [0.0, 0.0, 0.0],
+    ]
+    result = uncert_core.covariance_completion_bounds(covariance, [1.0, 1.0, 1.0])
+
+    assert result.completion_interval == (-6.0, 6.0)
+    assert nan_close(result.variance_min, 1.0)
+    assert nan_close(result.variance_max, 25.0)
+    assert result.rank_at_min < 3
+    assert result.rank_at_max < 3
+
+    # A zero-variance column cannot be correlated with another column.
+    with pytest.raises(uncert_core.CovarianceConflict) as exc_info:
+        uncert_core.covariance_completion_bounds(
+            [
+                [4.0, None, 1.0],
+                [None, 9.0, 0.0],
+                [1.0, 0.0, 0.0],
+            ],
+            [1.0, 1.0, 1.0],
+        )
+    assert (0, 2) in exc_info.value.conflicts
+
+
+def test_covariance_completion_rank_deficient():
+    """Compatible exactly rank-deficient completions are accepted."""
+
+    # Exact rank 1 matrix with c23 removed.  The only feasible
+    # completion is 12, which keeps the determinant at zero.
+    result = uncert_core.covariance_completion_bounds(
+        [
+            [4.0, 6.0, 8.0],
+            [6.0, 9.0, None],
+            [8.0, None, 16.0],
+        ],
+        [1.0, 1.0, 1.0],
+    )
+    assert nan_close(result.completion_lower, 12.0)
+    assert nan_close(result.completion_upper, 12.0)
+    assert result.is_fixed
+    assert result.rank_at_min < 3
+    assert nan_close(result.variance_min, result.variance_max)
+
+    # A fully specified rank-deficient matrix is also valid.
+    complete = uncert_core.covariance_completion_bounds(
+        [
+            [4.0, 6.0, 8.0],
+            [6.0, 9.0, 12.0],
+            [8.0, 12.0, 16.0],
+        ],
+        [1.0, 1.0, 1.0],
+    )
+    assert complete.missing_pair is None
+    assert complete.rank_lower < 3
+    assert nan_close(complete.variance_min, complete.variance_max)
+
+
+def test_covariance_completion_conflict_columns():
+    """Conflicting known entries identify the responsible columns."""
+
+    # A pairwise covariance outside +/-sqrt(v_i v_j).
+    with pytest.raises(uncert_core.CovarianceConflict) as exc_info:
+        uncert_core.covariance_completion_bounds(
+            [
+                [1.0, 3.0, 0.0],
+                [3.0, 4.0, 0.0],
+                [0.0, 0.0, 9.0],
+            ],
+            [1.0, 1.0, 1.0],
+            columns=["a", "b", "c"],
+        )
+    conflict = exc_info.value
+    assert conflict.conflict_columns == (("a", "b"),)
+    assert conflict.conflicts == ((0, 1),)
+
+    # The three pairwise entries are each individually valid but their
+    # determinant is negative, so the report spans all three columns.
+    with pytest.raises(uncert_core.CovarianceConflict) as exc_info:
+        uncert_core.covariance_completion_bounds(
+            [
+                [1.0, 0.9, 0.9],
+                [0.9, 1.0, -0.9],
+                [0.9, -0.9, 1.0],
+            ],
+            [1.0, 1.0, 1.0],
+            columns=["x", "y", "z"],
+        )
+    assert exc_info.value.conflict_columns == (("x", "y", "z"),)
+
+
+def test_partial_covariance_bounds_from_supplier_table():
+    """The table wrapper accepts std devs plus a partial covariance map."""
+
+    std_devs = [2.0, 3.0, 4.0]
+    covariances = {
+        (0, 1): 3.0,
+        (2, 0): -2.0,  # keys may be in either order
+    }
+    result = uncert_core.partial_covariance_bounds(
+        std_devs, covariances, [0.0, 1.0, 1.0], columns=["a", "b", "c"]
+    )
+
+    assert result.missing_pair == (1, 2)
+    assert result.as_dict()["missing_columns"] == ("b", "c")
+    assert nan_close(result.completion_lower, -11.562305898749054)
+    assert nan_close(result.completion_upper, 8.562305898749054)
+    assert result.variance_min < result.variance_max
+
+    # A supplied diagonal is not silently treated as a missing pair.
+    with pytest.raises(ValueError):
+        uncert_core.partial_covariance_bounds(std_devs, {(0, 0): 4.0, (0, 1): 3.0})
+
+
+def test_covariance_completion_requires_exactly_one_missing_pair():
+    """The 3-column contract is explicit about how many blanks are allowed."""
+
+    with pytest.raises(ValueError, match="must be missing"):
+        uncert_core.covariance_completion_bounds(
+            [
+                [4.0, None, None],
+                [None, 9.0, 3.0],
+                [None, 3.0, 16.0],
+            ],
+            [1.0, 1.0, 1.0],
+        )
+
+    with pytest.raises(ValueError, match="diagonal"):
+        uncert_core.covariance_completion_bounds(
+            [
+                [4.0, 3.0, -2.0],
+                [3.0, None, 3.0],
+                [-2.0, 3.0, 16.0],
+            ],
+            [1.0, 1.0, 1.0],
+        )
+
+
+###############################################################################
 
 # The tests below require NumPy, which is an optional package:
 try:

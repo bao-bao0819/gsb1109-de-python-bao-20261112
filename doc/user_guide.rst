@@ -536,6 +536,83 @@ The three returned numbers with uncertainties have the correct
 uncertainties and correlations (:data:`corr_matrix` can be recovered
 through :func:`correlation_matrix`).
 
+.. index:: partial covariance matrix; covariance completion
+
+Bounding a variance with missing covariances
+--------------------------------------------
+
+A supplier may report the standard deviation of each measured column but
+only some of the pairwise covariances.  Leaving a missing covariance at
+zero is an assumption, not a neutral choice.  For three columns with one
+missing off-diagonal entry, :func:`covariance_completion_bounds` returns
+the complete set of values that are compatible with positive
+semidefiniteness, together with the attainable extrema of any requested
+linear combination.
+
+The variances go on the diagonal.  A missing entry can be written as
+``None`` or ``NaN``:
+
+>>> from uncertainties import covariance_completion_bounds
+>>> covariance = [
+...     [4.0, 3.0, -2.0],
+...     [3.0, 9.0, None],
+...     [-2.0, None, 16.0],
+... ]
+>>> result = covariance_completion_bounds(
+...     covariance, [0.0, 1.0, 1.0], columns=["a", "b", "c"]
+... )
+>>> result.missing_pair
+(1, 2)
+
+The feasible interval and the variance of ``b + c`` are:
+
+>>> print(f"{result.completion_lower:.6f}")
+-11.562306
+>>> print(f"{result.completion_upper:.6f}")
+8.562306
+>>> print(f"{result.variance_min:.6f}")
+1.875388
+>>> print(f"{result.variance_max:.6f}")
+42.124612
+
+The endpoints are achieved by positive-semidefinite matrices; they are
+rank 2 here.  ``result.covariance_at_min`` and ``result.covariance_at_max``
+return the two completed matrices, and
+``result.completion_at_min``/``completion_at_max`` contain just the
+missing covariance values.
+
+A supplier table with standard deviations and a partial covariance
+dictionary uses the same calculation:
+
+>>> from uncertainties import partial_covariance_bounds
+>>> result = partial_covariance_bounds(
+...     [2.0, 3.0, 4.0],
+...     {(0, 1): 3.0, (0, 2): -2.0},
+...     [0.0, 1.0, 1.0],
+...     columns=["a", "b", "c"],
+... )
+>>> result.missing_pair
+(1, 2)
+
+The variance of a linear combination is affine in the missing entry, so
+its extrema are always at the two ends of the feasible interval; they do
+not require a search.  A zero variance column is handled through the
+Schur-complement limit, and an exactly rank-deficient (including rank 2 or
+rank 1) source batch is accepted.  If the supplied entries cannot belong
+to any positive-semidefinite matrix, :class:`CovarianceConflict` is raised
+and ``conflict_columns`` names the offending columns:
+
+>>> from uncertainties import CovarianceConflict
+>>> try:
+...     covariance_completion_bounds(
+...         [[1.0, 0.9, 0.9], [0.9, 1.0, -0.9], [0.9, -0.9, 1.0]],
+...         [1.0, 1.0, 1.0],
+...         columns=["a", "b", "c"],
+...     )
+... except CovarianceConflict as error:
+...     print(error.conflict_columns)
+(('a', 'b', 'c'),)
+
 .. index::
    single: C code; wrapping
    single: Fortran code; wrapping

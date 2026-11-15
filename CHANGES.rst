@@ -11,6 +11,15 @@ Changes:
 - Updates the `codspeed` github action to use `v5` instead of `v3`. This was required for compatibility with github
   actions updating their ubuntu action runners.
 
+Adds:
+
+- ``covariance_completion_bounds()`` and ``partial_covariance_bounds()`` for
+  bounding a linear-combination variance over all positive-semidefinite
+  completions of a 3x3 covariance matrix with one missing off-diagonal entry.
+  Zero-variance and rank-deficient inputs are supported, and incompatible
+  known entries are reported through ``CovarianceConflict`` with the offending
+  column labels.
+
 3.2.4   2026-January-9
 -----------------------
 
